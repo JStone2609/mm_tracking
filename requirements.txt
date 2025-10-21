@@ -1,6 +1,6 @@
 streamlit==1.37.1
-yfinance==0.2.43
+yfinance[fast]==0.2.43
+curl_cffi>=0.6.2
 pandas>=2.0,<2.3
 numpy>=1.25
 plotly>=5.22
-requests>=2.31

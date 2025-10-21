@@ -27,6 +27,8 @@ DEFAULT_COMPETITORS = [
 
 # ---------- Sidebar ----------
 with st.sidebar:
+    debug_mode = st.sidebar.toggle("Debug mode", value=False)
+
     st.header("Settings")
     competitors = st.multiselect(
         "Competitors",
@@ -80,80 +82,108 @@ def load_map_path(path: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False, ttl=60*60)  # we'll still override ttl dynamically
 def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cache_tag):
     """
-    Robust Yahoo fetch without custom session (let yfinance manage curl_cffi session):
-      1) Try a single batch download for all symbols.
-      2) Fall back to per-symbol Ticker().history().
-    Returns: dict[symbol] -> pd.Series (price field).
+    Robust Yahoo fetch without custom session:
+      1) Chunked batch download (more reliable on Streamlit Cloud).
+      2) Per-symbol fallback with small retries.
+    Returns: dict[symbol] -> pd.Series (field).
     """
-    symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
+    def choose_field(cols):
+        if field in cols:
+            return field
+        if auto_adjust_flag and "Close" in cols:
+            return "Close"
+        return None
 
+    symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
     ok, failed = {}, []
 
-    # ---------- 1) Batch attempt ----------
-    try:
-        df = yf.download(
-            tickers=symbols,       # pass list, yfinance handles it
-            start=start_date,
-            end=end_date,          # end is exclusive; you're already using "tomorrow"
-            interval="1d",
-            auto_adjust=auto_adjust_flag,
-            group_by="ticker",
-            progress=False,
-            threads=False,         # more reliable in Cloud
-        )
-        if df is not None and not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                # multi-ticker frame
-                root_syms = set(df.columns.get_level_values(0))
-                for sym in symbols:
-                    if sym in root_syms:
-                        sub = df[sym]
-                        use_field = field if field in sub.columns else ("Close" if auto_adjust_flag and "Close" in sub.columns else None)
-                        if use_field is not None:
-                            s = sub[use_field].dropna().sort_index()
-                            if not s.empty:
-                                ok[sym] = s
-                            else:
-                                failed.append(sym)
-                        else:
-                            failed.append(sym)
-                    else:
-                        failed.append(sym)
-            else:
-                # single-ticker frame
-                use_field = field if field in df.columns else ("Close" if auto_adjust_flag and "Close" in df.columns else None)
-                if use_field is not None:
-                    s = df[use_field].dropna().sort_index()
-                    if not s.empty and len(symbols) == 1:
-                        ok[symbols[0]] = s
-                # otherwise fallback will handle
-    except Exception:
-        pass  # fallback will handle
+    # ----- 1) Chunked batch downloads -----
+    CHUNK = 8
+    for i in range(0, len(symbols), CHUNK):
+        chunk = symbols[i:i+CHUNK]
+        try:
+            df = yf.download(
+                tickers=chunk,
+                start=start_date,
+                end=end_date,          # end is exclusive
+                interval="1d",
+                auto_adjust=auto_adjust_flag,
+                group_by="ticker",
+                progress=False,
+                threads=False,
+            )
+        except Exception:
+            df = None
 
-    # ---------- 2) Fallback per symbol for any missing ----------
+        if df is None or df.empty:
+            # we'll handle in fallback
+            failed.extend(chunk)
+            continue
+
+        if isinstance(df.columns, pd.MultiIndex):
+            # multi-ticker frame
+            root_syms = set(df.columns.get_level_values(0))
+            for sym in chunk:
+                if sym not in root_syms:
+                    failed.append(sym)
+                    continue
+                sub = df[sym]
+                use_field = choose_field(sub.columns)
+                if use_field is None:
+                    failed.append(sym)
+                    continue
+                s = sub[use_field].dropna().sort_index()
+                if s.empty:
+                    failed.append(sym)
+                else:
+                    ok[sym] = s
+        else:
+            # single-ticker frame (happens if chunk==1 or upstream returns flat cols)
+            use_field = choose_field(df.columns)
+            if use_field is None:
+                failed.extend(chunk)
+            else:
+                s = df[use_field].dropna().sort_index()
+                if s.empty:
+                    failed.extend(chunk)
+                else:
+                    # If multiple symbols in chunk but we got a flat frame,
+                    # we can't reliably map; let fallback fix any missing.
+                    if len(chunk) == 1:
+                        ok[chunk[0]] = s
+                    else:
+                        # don't guess; leave to fallback
+                        failed.extend([sym for sym in chunk if sym not in ok])
+
+    # ----- 2) Per-symbol fallback for any still missing -----
     missing = [s for s in symbols if s not in ok]
     for sym in missing:
-        got = False
+        success = False
         for _ in range(3):  # small retry loop
             try:
                 h = yf.Ticker(sym).history(
                     start=start_date, end=end_date,
                     interval="1d", auto_adjust=auto_adjust_flag
                 )
-                if h is not None and not h.empty:
-                    use_field = field if field in h.columns else ("Close" if auto_adjust_flag and "Close" in h.columns else None)
-                    if use_field is not None:
-                        s = h[use_field].dropna().sort_index()
-                        if not s.empty:
-                            ok[sym] = s
-                            got = True
-                            break
+                if h is None or h.empty:
+                    continue
+                use_field = choose_field(h.columns)
+                if use_field is None:
+                    continue
+                s = h[use_field].dropna().sort_index()
+                if s.empty:
+                    continue
+                ok[sym] = s
+                success = True
+                break
             except Exception:
                 continue
-        if not got:
+        if not success:
             failed.append(sym)
 
+    # ----- Report & return -----
     if failed:
+        # unique + drop any that succeeded in the meantime
         failed = [f for f in dict.fromkeys(failed) if f not in ok]
         if failed:
             st.warning(
@@ -162,16 +192,18 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
             )
 
     if not ok:
+        # Show a visible error but don’t dump internals
         raise RuntimeError(
             f"No price data downloaded. start={start_date}, end={end_date}, field={field}, "
-            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols) > 10 else ''}"
+            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols)>10 else ''}"
         )
 
-    # Clean duplicate indices
+    # Clean duplicate indices for safety
     for k, s in list(ok.items()):
         ok[k] = s[~s.index.duplicated(keep="first")]
 
     return ok
+
 
 
 
@@ -280,6 +312,9 @@ with st.spinner("Downloading prices from Yahoo Finance…"):
     "py_version": __import__("sys").version,
 })
 
+    if debug_mode:
+        df_probe = yf.download("SPY", start=start_date, end=END_DATE, progress=False, threads=False)
+        st.write("Probe SPY rows:", 0 if df_probe is None else len(df_probe))
     # override default TTL with user choice
     download_prices.clear()  # ensure the custom ttl below applies fresh
     download_prices.ttl = 60 * int(cache_ttl)
