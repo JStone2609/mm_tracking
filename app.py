@@ -1,3 +1,4 @@
+# app.py
 import io
 from pathlib import Path
 from datetime import datetime
@@ -7,36 +8,35 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
-import requests
 
-# --- yfinance session helper (curl_cffi) ---
+# ──────────────────────────────────────────────────────────────────────────────
+# Streamlit page config MUST be the first Streamlit call
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# yfinance session helper (uses curl_cffi via yfinance[fast])
+# ──────────────────────────────────────────────────────────────────────────────
 def make_yf_session():
     """
     Return a curl_cffi session yfinance is happy with.
-    If curl_cffi isn't available for some reason, return None and
-    let yfinance create its own (it will complain on Cloud if needed).
+    If curl_cffi isn't available, return None and let yfinance create its own.
     """
     try:
         from curl_cffi import requests as cf_requests
-        # "chrome" or "safari" are fine; chrome is typical
         return cf_requests.Session(impersonate="chrome")
     except Exception:
         return None
 
 YF_SESSION = make_yf_session()
-st.write({
-    "yf_version": getattr(yf, "__version__", "unknown"),
-    "curl_cffi_available": YF_SESSION is not None,
-})
 
+# Optional on-disk cache (committed by your GitHub Action)
 CACHE_FILE = "prices_cache.parquet"
 
 def write_prices_cache(price_dict: dict[str, pd.Series]) -> None:
-    # store a single DataFrame with columns per symbol
     if not price_dict:
         return
     df = pd.DataFrame(price_dict)
-    # ensure datetime index
     df.index = pd.to_datetime(df.index)
     df.sort_index(inplace=True)
     df.to_parquet(CACHE_FILE)
@@ -46,23 +46,25 @@ def read_prices_cache() -> dict[str, pd.Series] | None:
         df = pd.read_parquet(CACHE_FILE)
         if df.empty:
             return None
-        # convert back to dict of Series
         out = {}
         for col in df.columns:
             s = df[col].dropna()
             if not s.empty:
                 s.name = col
                 out[col] = s
-        return out if out else None
+        return out or None
     except Exception:
         return None
 
-# ---------- Page setup ----------
-st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
+# ──────────────────────────────────────────────────────────────────────────────
+# Page header
+# ──────────────────────────────────────────────────────────────────────────────
 st.title("MM Top 20 vs Competitors — ROI")
 st.caption("Level stakes; competitors buy on the same entry dates as MM Top 20 (rolled to next open day).")
 
-# ---------- Config: files bundled in repo ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Config: files bundled in repo
+# ──────────────────────────────────────────────────────────────────────────────
 MM_PATH = "mm_top_20.csv"
 MAP_PATH = "ticker_map.csv"
 
@@ -70,27 +72,41 @@ DEFAULT_COMPETITORS = [
     "SPY", "QQQ", "VTI", "RSP", "QQQE",
     "IWM", "DIA", "ACWI", "EFA", "EEM",
     "XLK", "SMH", "XLE", "XLF", "XLV",
-    "VNQ", "GLD", "TLT", "BTC-USD"
+    "VNQ", "GLD", "TLT", "BTC-USD",
 ]
 
-# ---------- Sidebar ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    debug_mode = st.sidebar.toggle("Debug mode", value=False)
+    debug_mode = st.toggle("Debug mode", value=False)
 
     st.header("Settings")
     competitors = st.multiselect(
         "Competitors",
         options=DEFAULT_COMPETITORS,
-        default=["SPY", "QQQ"]
+        default=["SPY", "QQQ"],
     )
     price_field = st.selectbox("Price field", ["Adj Close", "Close", "Open"], index=0)
     auto_adjust = st.checkbox("Auto-adjust (recommended)", value=True)
-    start_buffer_days = st.number_input("Start buffer (days before earliest buy)", min_value=0, max_value=30, value=5)
+    start_buffer_days = st.number_input(
+        "Start buffer (days before earliest buy)", min_value=0, max_value=30, value=5
+    )
     business_days = st.checkbox("Business-day calendar & ffill", value=True)
-    cache_ttl = st.select_slider("Refresh cache (minutes)", options=[5, 15, 30, 60, 180, 360], value=60)
+    cache_ttl = st.select_slider(
+        "Refresh cache (minutes)", options=[5, 15, 30, 60, 180, 360], value=60
+    )
     refresh = st.button("Refresh now", type="primary", use_container_width=True)
 
-# ---------- Helpers ----------
+if debug_mode:
+    st.json({
+        "yf_version": getattr(yf, "__version__", "unknown"),
+        "curl_cffi_available": YF_SESSION is not None,
+    })
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def exchsym_to_yahoo(resolved: str) -> str | None:
     if not isinstance(resolved, str) or ":" not in resolved:
         return None
@@ -101,39 +117,38 @@ def exchsym_to_yahoo(resolved: str) -> str | None:
         "NASDAQ": "", "NYSE": "", "AMEX": "", "NYSEARCA": "",
         "LON": ".L", "LSE": ".L", "AMS": ".AS",
     }
-    suf = suffix_map.get(exch, "")
-    return sym + suf
+    return sym + suffix_map.get(exch, "")
 
 def load_buys_path(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    if not {"Ticker","Date"}.issubset(df.columns):
+    if not {"Ticker", "Date"}.issubset(df.columns):
         raise ValueError("mm_top_20.csv must have columns: Ticker, Date")
-    out = df[["Ticker","Date"]].copy()
-    out.columns = ["user_ticker","buy_date"]
+    out = df[["Ticker", "Date"]].copy()
+    out.columns = ["user_ticker", "buy_date"]
     out["user_ticker"] = out["user_ticker"].astype(str).str.strip()
     out["buy_date"] = pd.to_datetime(out["buy_date"], errors="coerce")
     if out["buy_date"].isna().any():
         raise ValueError("Some buy dates in mm_top_20.csv could not be parsed.")
-    return out.dropna(subset=["user_ticker","buy_date"]).reset_index(drop=True)
+    return out.dropna(subset=["user_ticker", "buy_date"]).reset_index(drop=True)
 
 def load_map_path(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    if not {"User Ticker","Resolved Ticker"}.issubset(df.columns):
+    if not {"User Ticker", "Resolved Ticker"}.issubset(df.columns):
         raise ValueError("ticker_map.csv must have columns: User Ticker, Resolved Ticker, (optional) Currency")
-    tmap = df[["User Ticker","Resolved Ticker"]].copy()
-    tmap.columns = ["user_ticker","resolved"]
+    tmap = df[["User Ticker", "Resolved Ticker"]].copy()
+    tmap.columns = ["user_ticker", "resolved"]
     tmap["user_ticker"] = tmap["user_ticker"].astype(str).str.strip()
     tmap["resolved"] = tmap["resolved"].astype(str).str.strip()
     tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
     return tmap
 
-@st.cache_data(show_spinner=False, ttl=60*60)  # override ttl later as before
+@st.cache_data(show_spinner=False, ttl=60 * 60)  # ttl overridden dynamically
 def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cache_tag):
     """
-    Robust Yahoo fetch using curl_cffi session when available:
+    Robust Yahoo fetch using curl_cffi session (when available):
       1) Chunked batch download.
       2) Per-symbol fallback with small retries.
-    Returns: dict[symbol] -> pd.Series (field).
+    Returns: dict[symbol] -> pd.Series (selected field).
     """
     def choose_field(cols):
         if field in cols:
@@ -142,24 +157,24 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
             return "Close"
         return None
 
-    symbols = list(dict.fromkeys(symbols))  # de-dup
+    symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
     ok, failed = {}, []
-
-    # ----- 1) Chunked batch downloads -----
     CHUNK = 8
+
+    # 1) Chunked batch downloads
     for i in range(0, len(symbols), CHUNK):
-        chunk = symbols[i:i+CHUNK]
+        chunk = symbols[i:i + CHUNK]
         try:
             df = yf.download(
                 tickers=chunk,
                 start=start_date,
-                end=end_date,          # end is exclusive
+                end=end_date,                  # end is exclusive
                 interval="1d",
                 auto_adjust=auto_adjust_flag,
                 group_by="ticker",
                 progress=False,
                 threads=False,
-                session=YF_SESSION,    # <<<<<< IMPORTANT
+                session=YF_SESSION,
             )
         except Exception:
             df = None
@@ -196,13 +211,13 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
                     else:
                         failed.extend([sym for sym in chunk if sym not in ok])
 
-    # ----- 2) Per-symbol fallback for any still missing -----
+    # 2) Per-symbol fallback for any still missing
     missing = [s for s in symbols if s not in ok]
     for sym in missing:
         success = False
         for _ in range(3):
             try:
-                h = yf.Ticker(sym, session=YF_SESSION).history(  # <<<<<< IMPORTANT
+                h = yf.Ticker(sym, session=YF_SESSION).history(
                     start=start_date, end=end_date,
                     interval="1d", auto_adjust=auto_adjust_flag
                 )
@@ -222,7 +237,7 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
         if not success:
             failed.append(sym)
 
-    # ----- Report & return -----
+    # Report & return
     if failed:
         failed = [f for f in dict.fromkeys(failed) if f not in ok]
         if failed:
@@ -234,21 +249,18 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
     if not ok:
         raise RuntimeError(
             f"No price data downloaded. start={start_date}, end={end_date}, field={field}, "
-            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols)>10 else ''}"
+            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols) > 10 else ''}"
         )
 
+    # Clean duplicate indices
     for k, s in list(ok.items()):
         ok[k] = s[~s.index.duplicated(keep="first")]
     return ok
 
-
-
-
-
 def build_business_index(price_series, end_date, use_bdays: bool):
     if use_bdays:
         union_start = min(s.index.min().date() for s in price_series.values())
-        union_end   = datetime.fromisoformat(end_date).date()
+        union_end = datetime.fromisoformat(end_date).date()
         return pd.bdate_range(union_start, union_end, freq="C")
     idx = pd.DatetimeIndex(sorted(set().union(*[s.index for s in price_series.values()])))
     return idx
@@ -318,7 +330,9 @@ def build_chart(benchmarks_df: pd.DataFrame):
     )
     return fig
 
-# ---------- Main run ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Main run
+# ──────────────────────────────────────────────────────────────────────────────
 try:
     buys = load_buys_path(MM_PATH)
     tmap = load_map_path(MAP_PATH)
@@ -326,7 +340,7 @@ except Exception as e:
     st.error(f"Failed to read CSVs: {e}")
     st.stop()
 
-mapped = buys.merge(tmap[["user_ticker","yf_ticker"]], on="user_ticker", how="left")
+mapped = buys.merge(tmap[["user_ticker", "yf_ticker"]], on="user_ticker", how="left")
 mapped["yf_ticker"] = np.where(
     mapped["yf_ticker"].isna() | (mapped["yf_ticker"].str.len() == 0),
     mapped["user_ticker"].str.upper(),
@@ -334,7 +348,6 @@ mapped["yf_ticker"] = np.where(
 )
 
 END_DATE = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
-
 start_date = (mapped["buy_date"].min() - pd.Timedelta(days=int(start_buffer_days))).date().isoformat()
 all_syms = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() + competitors))
 
@@ -342,36 +355,33 @@ all_syms = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() + competito
 cache_tag = f"{price_field}-{auto_adjust}-{business_days}-{start_date}-{END_DATE}-{sorted(competitors)}-{refresh}-{cache_ttl}"
 
 with st.spinner("Downloading prices from Yahoo Finance…"):
-    st.write({
-        "start_date": start_date,
-        "end_date": END_DATE,
-        "symbols_count": len(all_syms),
-        "first_symbols": all_syms[:10],
-        "py_version": __import__("sys").version,
-    })
     if debug_mode:
-        df_probe = yf.download("SPY", start=start_date, end=END_DATE, progress=False, threads=False, session=YF_SESSION)
-        st.write("Probe SPY rows:", 0 if df_probe is None else len(df_probe))
+        st.json({
+            "start_date": start_date,
+            "end_date": END_DATE,
+            "symbols_count": len(all_syms),
+            "first_symbols": all_syms[:10],
+            "py_version": __import__("sys").version,
+        })
 
+
+    # override default TTL with user choice
     download_prices.clear()
     download_prices.ttl = 60 * int(cache_ttl)
 
     try:
         price_series = download_prices(all_syms, start_date, END_DATE, price_field, auto_adjust, cache_tag)
-        # save a cache snapshot that the app can use next time if Yahoo blocks us
-        write_prices_cache(price_series)
-    except Exception as e:
+        write_prices_cache(price_series)  # snapshot to parquet for later fallback
+    except Exception:
         st.warning("Live download failed. Attempting to use cached prices instead.")
         cached = read_prices_cache()
         if cached is None:
             st.error("No cached prices available and live download failed.")
             st.stop()
-        # restrict to the symbols we need (and drop missing)
         price_series = {s: cached[s] for s in all_syms if s in cached}
         if not price_series:
             st.error("Cached file found, but none of the requested symbols are available.")
             st.stop()
-
 
 # Build date index & forward-fill
 date_index = build_business_index(price_series, END_DATE, business_days)
@@ -402,44 +412,50 @@ if not per_purchase_values:
 per_purchase_matrix = pd.DataFrame(per_purchase_values)
 per_purchase_matrix.columns = per_purchase_matrix.columns.strftime("%Y-%m-%d")
 per_purchase_matrix.insert(0, "Buy Date", [k[1] for k in row_keys])
-per_purchase_matrix.insert(0, "Ticker",   [k[0] for k in row_keys])
+per_purchase_matrix.insert(0, "Ticker", [k[0] for k in row_keys])
 per_purchase_matrix.insert(2, "Yahoo Symbol", [k[2] for k in row_keys])
 
 # Portfolio aggregates
 portfolio_df = aggregate_from_values_matrix(per_purchase_matrix)
 portfolio_df["series"] = "MM Top 20"
 
-# Synchronized competitor entries (use actual entry dates of portfolio)
+# Synchronized competitor entries
 value_cols = per_purchase_matrix.columns[3:]
 value_dt_index = pd.to_datetime(value_cols)
 entry_dates = []
 for _, r in per_purchase_matrix.iterrows():
     vals = r[value_cols].astype(float).to_numpy()
     nz = np.flatnonzero(vals > 0)
-    if nz.size == 0: continue
+    if nz.size == 0:
+        continue
     entry_dates.append(value_dt_index[nz[0]])
 
 def competitor_timeseries_synced(sym: str) -> pd.DataFrame:
-    if sym not in prices.columns: return pd.DataFrame()
+    if sym not in prices.columns:
+        return pd.DataFrame()
     per_list = []
     for ent in entry_dates:
         pos = date_index.searchsorted(ent.normalize())
-        if pos >= len(date_index): continue
+        if pos >= len(date_index):
+            continue
         ent2 = date_index[pos]
         p0 = prices.loc[ent2, sym]
         if pd.isna(p0) or p0 == 0:
             pos2 = pos + 1
-            if pos2 >= len(date_index): continue
+            if pos2 >= len(date_index):
+                continue
             ent2 = date_index[pos2]
             p0 = prices.loc[ent2, sym]
-            if pd.isna(p0) or p0 == 0: continue
+            if pd.isna(p0) or p0 == 0:
+                continue
         s_val = (prices[sym] / p0).where(prices.index >= ent2, 0.0)
         per_list.append(s_val)
-    if not per_list: return pd.DataFrame()
+    if not per_list:
+        return pd.DataFrame()
     mat = pd.DataFrame(per_list)
     mat.columns = mat.columns.strftime("%Y-%m-%d")
     mat.insert(0, "Buy Date", [""] * len(mat))
-    mat.insert(0, "Ticker",   [""] * len(mat))
+    mat.insert(0, "Ticker", [""] * len(mat))
     mat.insert(2, "Yahoo Symbol", [sym] * len(mat))
     ts = aggregate_from_values_matrix(mat)
     ts["series"] = sym
@@ -448,22 +464,23 @@ def competitor_timeseries_synced(sym: str) -> pd.DataFrame:
 bench_long = [portfolio_df]
 for comp in competitors:
     cdf = competitor_timeseries_synced(comp)
-    if not cdf.empty: bench_long.append(cdf)
+    if not cdf.empty:
+        bench_long.append(cdf)
 benchmarks_df = pd.concat(bench_long, ignore_index=True)
 
 # Plot
 fig = build_chart(benchmarks_df)
 st.plotly_chart(fig, use_container_width=True)
 
-# Show last price date
+# Last price date
 last_date = benchmarks_df["date"].max().date()
 st.caption(f"Last price date: **{last_date.isoformat()}** (auto-refresh every ~{cache_ttl} minutes or on demand via the button).")
 
-# Download chart as self-contained HTML
+# Download chart as standalone HTML
 html_bytes = fig.to_html(full_html=True, include_plotlyjs="inline").encode("utf-8")
 st.download_button(
     label="Download chart as HTML",
     file_name=f"mm_top20_vs_competitors_{datetime.utcnow().date().isoformat()}.html",
     data=html_bytes,
-    mime="text/html"
+    mime="text/html",
 )
