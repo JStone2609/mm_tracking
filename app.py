@@ -77,34 +77,66 @@ def load_map_path(path: str) -> pd.DataFrame:
     return tmap
 
 # Cache Yahoo downloads for speed; invalidate when user hits Refresh or TTL expires
-@st.cache_data(show_spinner=False, ttl=60*60)  # default 60 min, overridden later
+@st.cache_data(show_spinner=False, ttl=60*60)  # default 60 min, set dynamically later
 def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cache_tag):
-    price_series = {}
+    """
+    Reliable per-symbol downloader: single-threaded + retries + clear diagnostics.
+    """
+    ok = {}
+    failed = []
+
+    def _fetch(sym: str):
+        for attempt in range(3):  # small retry loop
+            try:
+                dfp = yf.download(
+                    sym,
+                    start=start_date,
+                    end=end_date,         # exclusive; we already set end = tomorrow
+                    interval="1d",
+                    auto_adjust=auto_adjust_flag,
+                    progress=False,
+                    threads=False,        # <- important on Cloud
+                    timeout=30
+                )
+                if dfp is not None and not dfp.empty:
+                    return dfp
+            except Exception:
+                pass
+        return None
+
     for sym in symbols:
-        try:
-            dfp = yf.download(
-                sym, start=start_date, end=end_date,
-                interval="1d", auto_adjust=auto_adjust_flag,
-                progress=False, threads=True
-            )
-            if dfp.empty:
-                continue
-            use_field = field
-            if use_field not in dfp.columns:
-                if field == "Adj Close" and "Close" in dfp.columns and auto_adjust_flag:
-                    use_field = "Close"
-                else:
-                    continue
-            s = dfp[use_field].copy()
-            s.name = sym
-            s = s.sort_index()
-            s = s[~s.index.duplicated(keep="first")]
-            price_series[sym] = s
-        except Exception:
+        dfp = _fetch(sym)
+        if dfp is None or dfp.empty:
+            failed.append(sym)
             continue
-    if not price_series:
-        raise RuntimeError("No price data downloaded.")
-    return price_series
+
+        use_field = field
+        if use_field not in dfp.columns:
+            if field == "Adj Close" and "Close" in dfp.columns and auto_adjust_flag:
+                use_field = "Close"
+            else:
+                failed.append(sym)
+                continue
+
+        s = dfp[use_field].copy()
+        s.name = sym
+        s = s.sort_index()
+        s = s[~s.index.duplicated(keep="first")]
+        ok[sym] = s
+
+    if failed:
+        st.warning(
+            f"Price download skipped/failed for {len(failed)} tickers: "
+            + ", ".join(failed[:12]) + ("…" if len(failed) > 12 else "")
+        )
+
+    if not ok:
+        raise RuntimeError(
+            f"No price data downloaded. start={start_date}, end={end_date}, field={field}, "
+            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols)>10 else ''}"
+        )
+    return ok
+
 
 def build_business_index(price_series, end_date, use_bdays: bool):
     if use_bdays:
@@ -194,7 +226,8 @@ mapped["yf_ticker"] = np.where(
     mapped["yf_ticker"]
 )
 
-END_DATE = datetime.utcnow().date().isoformat()
+END_DATE = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
+
 start_date = (mapped["buy_date"].min() - pd.Timedelta(days=int(start_buffer_days))).date().isoformat()
 all_syms = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() + competitors))
 
