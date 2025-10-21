@@ -1,0 +1,102 @@
+name: Update Prices Cache
+
+on:
+  schedule:
+    - cron: "20 21 * * 1-5"   # Mon-Fri, 21:20 UTC (after US close)
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "yfinance[fast]==0.2.43" curl_cffi pandas numpy
+
+      - name: Generate prices cache
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta
+          import pandas as pd, numpy as np
+          import yfinance as yf
+          try:
+              from curl_cffi import requests as cf_requests
+              sess = cf_requests.Session(impersonate="chrome")
+          except Exception:
+              sess = None
+
+          # Load your CSVs
+          import pandas as pd
+          buys = pd.read_csv("mm_top_20.csv")
+          tmap = pd.read_csv("ticker_map.csv")
+
+          def exchsym_to_yahoo(resolved: str) -> str | None:
+              if not isinstance(resolved, str) or ":" not in resolved: return None
+              exch, sym = resolved.split(":", 1)
+              suffix = {"NASDAQ":"","NYSE":"","AMEX":"","NYSEARCA":"","LON":".L","LSE":".L","AMS":".AS"}.get(exch.strip().upper(),"")
+              return sym.strip().upper() + suffix
+
+          tmap = tmap.rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"})
+          tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
+          buys = buys.rename(columns={"Ticker":"user_ticker","Date":"buy_date"})
+          mapped = buys.merge(tmap[["user_ticker","yf_ticker"]], on="user_ticker", how="left")
+          mapped["yf_ticker"] = np.where(
+              mapped["yf_ticker"].isna() | (mapped["yf_ticker"].astype(str).str.len() == 0),
+              mapped["user_ticker"].astype(str).str.upper(),
+              mapped["yf_ticker"]
+          )
+
+          start = (pd.to_datetime(mapped["buy_date"]).min() - pd.Timedelta(days=5)).date().isoformat()
+          end = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
+          symbols = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() +
+                               ["SPY","QQQ","VTI","RSP","QQQE","IWM","DIA","ACWI","EFA","EEM",
+                                "XLK","SMH","XLE","XLF","XLV","VNQ","GLD","TLT","BTC-USD"]))
+
+          ok = {}
+          CHUNK = 8
+          for i in range(0, len(symbols), CHUNK):
+              chunk = symbols[i:i+CHUNK]
+              df = yf.download(
+                  tickers=chunk, start=start, end=end,
+                  interval="1d", auto_adjust=True,
+                  group_by="ticker", progress=False, threads=False,
+                  session=sess
+              )
+              if df is None or df.empty:
+                  continue
+              if isinstance(df.columns, pd.MultiIndex):
+                  for sym in chunk:
+                      if sym in df.columns.get_level_values(0):
+                          s = df[sym]["Close"].dropna()
+                          if not s.empty: ok[sym] = s
+              else:
+                  if len(chunk) == 1 and "Close" in df.columns:
+                      ok[chunk[0]] = df["Close"].dropna()
+
+          import pathlib
+          if ok:
+              out = pd.DataFrame(ok)
+              out.index = pd.to_datetime(out.index)
+              out.sort_index(inplace=True)
+              out.to_parquet("prices_cache.parquet")
+              print("Wrote prices_cache.parquet with columns:", list(out.columns))
+          else:
+              raise SystemExit("No data fetched.")
+          PY
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prices_cache.parquet
+          git commit -m "Update prices cache" || echo "No changes"
+          git push

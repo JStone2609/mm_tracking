@@ -24,7 +24,38 @@ def make_yf_session():
         return None
 
 YF_SESSION = make_yf_session()
+st.write({
+    "yf_version": getattr(yf, "__version__", "unknown"),
+    "curl_cffi_available": YF_SESSION is not None,
+})
 
+CACHE_FILE = "prices_cache.parquet"
+
+def write_prices_cache(price_dict: dict[str, pd.Series]) -> None:
+    # store a single DataFrame with columns per symbol
+    if not price_dict:
+        return
+    df = pd.DataFrame(price_dict)
+    # ensure datetime index
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True)
+    df.to_parquet(CACHE_FILE)
+
+def read_prices_cache() -> dict[str, pd.Series] | None:
+    try:
+        df = pd.read_parquet(CACHE_FILE)
+        if df.empty:
+            return None
+        # convert back to dict of Series
+        out = {}
+        for col in df.columns:
+            s = df[col].dropna()
+            if not s.empty:
+                s.name = col
+                out[col] = s
+        return out if out else None
+    except Exception:
+        return None
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
@@ -312,21 +343,35 @@ cache_tag = f"{price_field}-{auto_adjust}-{business_days}-{start_date}-{END_DATE
 
 with st.spinner("Downloading prices from Yahoo Finance…"):
     st.write({
-    "start_date": start_date,
-    "end_date": END_DATE,
-    "symbols_count": len(all_syms),
-    "first_symbols": all_syms[:10],
-    "py_version": __import__("sys").version,
-})
-
+        "start_date": start_date,
+        "end_date": END_DATE,
+        "symbols_count": len(all_syms),
+        "first_symbols": all_syms[:10],
+        "py_version": __import__("sys").version,
+    })
     if debug_mode:
         df_probe = yf.download("SPY", start=start_date, end=END_DATE, progress=False, threads=False, session=YF_SESSION)
         st.write("Probe SPY rows:", 0 if df_probe is None else len(df_probe))
 
-    # override default TTL with user choice
-    download_prices.clear()  # ensure the custom ttl below applies fresh
+    download_prices.clear()
     download_prices.ttl = 60 * int(cache_ttl)
-    price_series = download_prices(all_syms, start_date, END_DATE, price_field, auto_adjust, cache_tag)
+
+    try:
+        price_series = download_prices(all_syms, start_date, END_DATE, price_field, auto_adjust, cache_tag)
+        # save a cache snapshot that the app can use next time if Yahoo blocks us
+        write_prices_cache(price_series)
+    except Exception as e:
+        st.warning("Live download failed. Attempting to use cached prices instead.")
+        cached = read_prices_cache()
+        if cached is None:
+            st.error("No cached prices available and live download failed.")
+            st.stop()
+        # restrict to the symbols we need (and drop missing)
+        price_series = {s: cached[s] for s in all_syms if s in cached}
+        if not price_series:
+            st.error("Cached file found, but none of the requested symbols are available.")
+            st.stop()
+
 
 # Build date index & forward-fill
 date_index = build_business_index(price_series, END_DATE, business_days)
