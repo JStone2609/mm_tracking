@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import requests
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
@@ -76,66 +77,102 @@ def load_map_path(path: str) -> pd.DataFrame:
     tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
     return tmap
 
-# Cache Yahoo downloads for speed; invalidate when user hits Refresh or TTL expires
-@st.cache_data(show_spinner=False, ttl=60*60)  # default 60 min, set dynamically later
+@st.cache_data(show_spinner=False, ttl=60*60)  # we'll still override ttl dynamically
 def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cache_tag):
     """
-    Reliable per-symbol downloader: single-threaded + retries + clear diagnostics.
+    Robust Yahoo fetch without custom session (let yfinance manage curl_cffi session):
+      1) Try a single batch download for all symbols.
+      2) Fall back to per-symbol Ticker().history().
+    Returns: dict[symbol] -> pd.Series (price field).
     """
-    ok = {}
-    failed = []
+    symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
 
-    def _fetch(sym: str):
-        for attempt in range(3):  # small retry loop
-            try:
-                dfp = yf.download(
-                    sym,
-                    start=start_date,
-                    end=end_date,         # exclusive; we already set end = tomorrow
-                    interval="1d",
-                    auto_adjust=auto_adjust_flag,
-                    progress=False,
-                    threads=False,        # <- important on Cloud
-                    timeout=30
-                )
-                if dfp is not None and not dfp.empty:
-                    return dfp
-            except Exception:
-                pass
-        return None
+    ok, failed = {}, []
 
-    for sym in symbols:
-        dfp = _fetch(sym)
-        if dfp is None or dfp.empty:
-            failed.append(sym)
-            continue
-
-        use_field = field
-        if use_field not in dfp.columns:
-            if field == "Adj Close" and "Close" in dfp.columns and auto_adjust_flag:
-                use_field = "Close"
+    # ---------- 1) Batch attempt ----------
+    try:
+        df = yf.download(
+            tickers=symbols,       # pass list, yfinance handles it
+            start=start_date,
+            end=end_date,          # end is exclusive; you're already using "tomorrow"
+            interval="1d",
+            auto_adjust=auto_adjust_flag,
+            group_by="ticker",
+            progress=False,
+            threads=False,         # more reliable in Cloud
+        )
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                # multi-ticker frame
+                root_syms = set(df.columns.get_level_values(0))
+                for sym in symbols:
+                    if sym in root_syms:
+                        sub = df[sym]
+                        use_field = field if field in sub.columns else ("Close" if auto_adjust_flag and "Close" in sub.columns else None)
+                        if use_field is not None:
+                            s = sub[use_field].dropna().sort_index()
+                            if not s.empty:
+                                ok[sym] = s
+                            else:
+                                failed.append(sym)
+                        else:
+                            failed.append(sym)
+                    else:
+                        failed.append(sym)
             else:
-                failed.append(sym)
-                continue
+                # single-ticker frame
+                use_field = field if field in df.columns else ("Close" if auto_adjust_flag and "Close" in df.columns else None)
+                if use_field is not None:
+                    s = df[use_field].dropna().sort_index()
+                    if not s.empty and len(symbols) == 1:
+                        ok[symbols[0]] = s
+                # otherwise fallback will handle
+    except Exception:
+        pass  # fallback will handle
 
-        s = dfp[use_field].copy()
-        s.name = sym
-        s = s.sort_index()
-        s = s[~s.index.duplicated(keep="first")]
-        ok[sym] = s
+    # ---------- 2) Fallback per symbol for any missing ----------
+    missing = [s for s in symbols if s not in ok]
+    for sym in missing:
+        got = False
+        for _ in range(3):  # small retry loop
+            try:
+                h = yf.Ticker(sym).history(
+                    start=start_date, end=end_date,
+                    interval="1d", auto_adjust=auto_adjust_flag
+                )
+                if h is not None and not h.empty:
+                    use_field = field if field in h.columns else ("Close" if auto_adjust_flag and "Close" in h.columns else None)
+                    if use_field is not None:
+                        s = h[use_field].dropna().sort_index()
+                        if not s.empty:
+                            ok[sym] = s
+                            got = True
+                            break
+            except Exception:
+                continue
+        if not got:
+            failed.append(sym)
 
     if failed:
-        st.warning(
-            f"Price download skipped/failed for {len(failed)} tickers: "
-            + ", ".join(failed[:12]) + ("…" if len(failed) > 12 else "")
-        )
+        failed = [f for f in dict.fromkeys(failed) if f not in ok]
+        if failed:
+            st.warning(
+                f"Price download skipped/failed for {len(failed)} tickers: "
+                + ", ".join(failed[:12]) + ("…" if len(failed) > 12 else "")
+            )
 
     if not ok:
         raise RuntimeError(
             f"No price data downloaded. start={start_date}, end={end_date}, field={field}, "
-            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols)>10 else ''}"
+            f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols) > 10 else ''}"
         )
+
+    # Clean duplicate indices
+    for k, s in list(ok.items()):
+        ok[k] = s[~s.index.duplicated(keep="first")]
+
     return ok
+
 
 
 def build_business_index(price_series, end_date, use_bdays: bool):
