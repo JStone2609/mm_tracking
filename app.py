@@ -1,4 +1,3 @@
-# app.py
 import io
 from pathlib import Path
 from datetime import datetime
@@ -9,18 +8,11 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Streamlit page config MUST be the first Streamlit call
-# ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# yfinance session helper (uses curl_cffi via yfinance[fast])
-# ──────────────────────────────────────────────────────────────────────────────
+# ==================== yfinance session (curl_cffi) ====================
 def make_yf_session():
     """
-    Return a curl_cffi session yfinance is happy with.
-    If curl_cffi isn't available, return None and let yfinance create its own.
+    Return a curl_cffi session that yfinance accepts.
+    If curl_cffi isn't available, return None and let yfinance create one.
     """
     try:
         from curl_cffi import requests as cf_requests
@@ -30,54 +22,32 @@ def make_yf_session():
 
 YF_SESSION = make_yf_session()
 
-# Optional on-disk cache (committed by your GitHub Action)
-CACHE_FILE = "prices_cache.parquet"
-
-def write_prices_cache(price_dict: dict[str, pd.Series]) -> None:
-    if not price_dict:
-        return
-    df = pd.DataFrame(price_dict)
-    df.index = pd.to_datetime(df.index)
-    df.sort_index(inplace=True)
-    df.to_parquet(CACHE_FILE)
-
-def read_prices_cache() -> dict[str, pd.Series] | None:
-    try:
-        df = pd.read_parquet(CACHE_FILE)
-        if df.empty:
-            return None
-        out = {}
-        for col in df.columns:
-            s = df[col].dropna()
-            if not s.empty:
-                s.name = col
-                out[col] = s
-        return out or None
-    except Exception:
-        return None
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Page header
-# ──────────────────────────────────────────────────────────────────────────────
+# ==================== Page setup (top-only title/subtitle) ====================
+st.set_page_config(page_title="MM Top 20 vs Competitors — ROI", layout="wide")
 st.title("MM Top 20 vs Competitors — ROI")
-st.caption("Level stakes; competitors buy on the same entry dates as MM Top 20 (rolled to next open day).")
+st.caption(
+    "Level stakes; competitors buy on the same entry dates as MM Top 20 "
+    "(rolled to next open day)."
+)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Config: files bundled in repo
-# ──────────────────────────────────────────────────────────────────────────────
+# ==================== Config / Files ====================
 MM_PATH = "mm_top_20.csv"
 MAP_PATH = "ticker_map.csv"
+CACHE_FILE = "prices_cache.parquet"
 
 DEFAULT_COMPETITORS = [
     "SPY", "QQQ", "VTI", "RSP", "QQQE",
     "IWM", "DIA", "ACWI", "EFA", "EEM",
     "XLK", "SMH", "XLE", "XLF", "XLV",
-    "VNQ", "GLD", "TLT", "BTC-USD",
+    "VNQ", "GLD", "TLT", "BTC-USD"
 ]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Sidebar
-# ──────────────────────────────────────────────────────────────────────────────
+# Lock former sidebar options to sane defaults
+AUTO_ADJUST = True          # previously "Auto-adjust (recommended)"
+START_BUFFER_DAYS = 5       # previously "Start buffer"
+BUSINESS_DAYS = True        # previously "Business-day calendar & ffill"
+
+# ==================== Sidebar (simplified) ====================
 with st.sidebar:
     debug_mode = st.toggle("Debug mode", value=False)
 
@@ -85,28 +55,16 @@ with st.sidebar:
     competitors = st.multiselect(
         "Competitors",
         options=DEFAULT_COMPETITORS,
-        default=["SPY", "QQQ"],
+        default=["SPY", "QQQ"]
     )
     price_field = st.selectbox("Price field", ["Adj Close", "Close", "Open"], index=0)
-    auto_adjust = st.checkbox("Auto-adjust (recommended)", value=True)
-    start_buffer_days = st.number_input(
-        "Start buffer (days before earliest buy)", min_value=0, max_value=30, value=5
-    )
-    business_days = st.checkbox("Business-day calendar & ffill", value=True)
+
     cache_ttl = st.select_slider(
         "Refresh cache (minutes)", options=[5, 15, 30, 60, 180, 360], value=60
     )
     refresh = st.button("Refresh now", type="primary", use_container_width=True)
 
-if debug_mode:
-    st.json({
-        "yf_version": getattr(yf, "__version__", "unknown"),
-        "curl_cffi_available": YF_SESSION is not None,
-    })
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ==================== Helpers ====================
 def exchsym_to_yahoo(resolved: str) -> str | None:
     if not isinstance(resolved, str) or ":" not in resolved:
         return None
@@ -134,7 +92,9 @@ def load_buys_path(path: str) -> pd.DataFrame:
 def load_map_path(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     if not {"User Ticker", "Resolved Ticker"}.issubset(df.columns):
-        raise ValueError("ticker_map.csv must have columns: User Ticker, Resolved Ticker, (optional) Currency")
+        raise ValueError(
+            "ticker_map.csv must have columns: User Ticker, Resolved Ticker, (optional) Currency"
+        )
     tmap = df[["User Ticker", "Resolved Ticker"]].copy()
     tmap.columns = ["user_ticker", "resolved"]
     tmap["user_ticker"] = tmap["user_ticker"].astype(str).str.strip()
@@ -142,13 +102,36 @@ def load_map_path(path: str) -> pd.DataFrame:
     tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
     return tmap
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)  # ttl overridden dynamically
+def write_prices_cache(price_dict: dict[str, pd.Series]) -> None:
+    if not price_dict:
+        return
+    df = pd.DataFrame(price_dict)
+    df.index = pd.to_datetime(df.index)
+    df.sort_index(inplace=True)
+    df.to_parquet(CACHE_FILE)
+
+def read_prices_cache() -> dict[str, pd.Series] | None:
+    try:
+        df = pd.read_parquet(CACHE_FILE)
+        if df.empty:
+            return None
+        out = {}
+        for col in df.columns:
+            s = df[col].dropna()
+            if not s.empty:
+                s.name = col
+                out[col] = s
+        return out or None
+    except Exception:
+        return None
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)  # ttl overridden at runtime
 def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cache_tag):
     """
-    Robust Yahoo fetch using curl_cffi session (when available):
+    Robust Yahoo fetch using curl_cffi session when available:
       1) Chunked batch download.
       2) Per-symbol fallback with small retries.
-    Returns: dict[symbol] -> pd.Series (selected field).
+    Returns: dict[symbol] -> pd.Series (field).
     """
     def choose_field(cols):
         if field in cols:
@@ -157,18 +140,18 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
             return "Close"
         return None
 
-    symbols = list(dict.fromkeys(symbols))  # de-dup, preserve order
+    symbols = list(dict.fromkeys(symbols))  # de-dup
     ok, failed = {}, []
-    CHUNK = 8
 
     # 1) Chunked batch downloads
+    CHUNK = 8
     for i in range(0, len(symbols), CHUNK):
-        chunk = symbols[i:i + CHUNK]
+        chunk = symbols[i : i + CHUNK]
         try:
             df = yf.download(
                 tickers=chunk,
                 start=start_date,
-                end=end_date,                  # end is exclusive
+                end=end_date,  # end is exclusive
                 interval="1d",
                 auto_adjust=auto_adjust_flag,
                 group_by="ticker",
@@ -187,11 +170,13 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
             root_syms = set(df.columns.get_level_values(0))
             for sym in chunk:
                 if sym not in root_syms:
-                    failed.append(sym); continue
+                    failed.append(sym)
+                    continue
                 sub = df[sym]
                 use_field = choose_field(sub.columns)
                 if use_field is None:
-                    failed.append(sym); continue
+                    failed.append(sym)
+                    continue
                 s = sub[use_field].dropna().sort_index()
                 if s.empty:
                     failed.append(sym)
@@ -209,17 +194,17 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
                     if len(chunk) == 1:
                         ok[chunk[0]] = s
                     else:
+                        # Can't reliably map; let fallback handle remaining.
                         failed.extend([sym for sym in chunk if sym not in ok])
 
-    # 2) Per-symbol fallback for any still missing
+    # 2) Per-symbol fallback
     missing = [s for s in symbols if s not in ok]
     for sym in missing:
         success = False
         for _ in range(3):
             try:
                 h = yf.Ticker(sym, session=YF_SESSION).history(
-                    start=start_date, end=end_date,
-                    interval="1d", auto_adjust=auto_adjust_flag
+                    start=start_date, end=end_date, interval="1d", auto_adjust=auto_adjust_flag
                 )
                 if h is None or h.empty:
                     continue
@@ -252,7 +237,6 @@ def download_prices(symbols, start_date, end_date, field, auto_adjust_flag, _cac
             f"auto_adjust={auto_adjust_flag}, symbols={symbols[:10]}{'…' if len(symbols) > 10 else ''}"
         )
 
-    # Clean duplicate indices
     for k, s in list(ok.items()):
         ok[k] = s[~s.index.duplicated(keep="first")]
     return ok
@@ -296,43 +280,47 @@ def build_chart(benchmarks_df: pd.DataFrame):
                 df["cumulative_profit"].to_numpy(),
                 df["roi"].to_numpy(),
             ],
-            axis=-1
+            axis=-1,
         )
         fig.add_trace(
             go.Scatter(
-                x=df["date"], y=df["roi"], mode="lines",
-                name=series_name, line=dict(width=2),
+                x=df["date"],
+                y=df["roi"],
+                mode="lines",
+                name=series_name,
+                line=dict(width=2),
                 customdata=customdata,
                 hovertemplate=(
                     "<b>%{x|%Y-%m-%d}</b><br>"
-                    + series_name + ": ROI %{y:.4f}<br>"
+                    + series_name
+                    + ": ROI %{y:.4f}<br>"
                     "Cumulative Profit: %{customdata[2]:.4f}<br>"
                     "Total Value: %{customdata[0]:.4f}<br>"
                     "Active Buys: %{customdata[1]:d}<extra></extra>"
                 ),
             )
         )
+
+    # No in-figure title/subtitle; legend safely above plot
     fig.update_layout(
-        title={
-            "text": "MM Top 20 vs Competitors<br>"
-                    "<sup style='color:gray'>Using level stake synchronised entry buys for competitors for each MM Top 20 buy</sup>",
-            "x": 0.5, "y": 0.98,
-        },
+        title=None,
         xaxis=dict(title="Date", rangeslider=dict(visible=True), type="date"),
         yaxis=dict(title="ROI", rangemode="tozero"),
         hovermode="x unified",
         legend=dict(
             orientation="h",
-            y=0.99, yanchor="top", x=0.5, xanchor="center",
-            bgcolor="rgba(255,255,255,0.7)", font=dict(size=11), itemwidth=70
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(255,255,255,0.6)",
+            borderwidth=0,
         ),
-        margin=dict(l=60, r=60, t=110, b=90),
+        margin=dict(l=60, r=60, t=50, b=90),
     )
     return fig
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main run
-# ──────────────────────────────────────────────────────────────────────────────
+# ==================== Main ====================
 try:
     buys = load_buys_path(MM_PATH)
     tmap = load_map_path(MAP_PATH)
@@ -342,36 +330,41 @@ except Exception as e:
 
 mapped = buys.merge(tmap[["user_ticker", "yf_ticker"]], on="user_ticker", how="left")
 mapped["yf_ticker"] = np.where(
-    mapped["yf_ticker"].isna() | (mapped["yf_ticker"].str.len() == 0),
-    mapped["user_ticker"].str.upper(),
-    mapped["yf_ticker"]
+    mapped["yf_ticker"].isna() | (mapped["yf_ticker"].astype(str).str.len() == 0),
+    mapped["user_ticker"].astype(str).str.upper(),
+    mapped["yf_ticker"],
 )
 
 END_DATE = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
-start_date = (mapped["buy_date"].min() - pd.Timedelta(days=int(start_buffer_days))).date().isoformat()
+start_date = (mapped["buy_date"].min() - pd.Timedelta(days=int(START_BUFFER_DAYS))).date().isoformat()
 all_syms = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() + competitors))
 
 # cache tag switches when user clicks refresh OR settings change
-cache_tag = f"{price_field}-{auto_adjust}-{business_days}-{start_date}-{END_DATE}-{sorted(competitors)}-{refresh}-{cache_ttl}"
+cache_tag = f"{price_field}-{BUSINESS_DAYS}-{START_BUFFER_DAYS}-{sorted(competitors)}-{refresh}-{cache_ttl}"
 
 with st.spinner("Downloading prices from Yahoo Finance…"):
     if debug_mode:
-        st.json({
-            "start_date": start_date,
-            "end_date": END_DATE,
-            "symbols_count": len(all_syms),
-            "first_symbols": all_syms[:10],
-            "py_version": __import__("sys").version,
-        })
+        st.json(
+            {
+                "yf_version": getattr(yf, "__version__", "unknown"),
+                "curl_cffi_available": YF_SESSION is not None,
+                "start_date": start_date,
+                "end_date": END_DATE,
+                "symbols_count": len(all_syms),
+                "first_symbols": all_syms[:10],
+                "py_version": __import__("sys").version,
+            }
+        )
+        probe = yf.download("SPY", start=start_date, end=END_DATE, progress=False, threads=False, session=YF_SESSION)
+        st.write("Probe SPY rows:", 0 if probe is None else len(probe))
 
-
-    # override default TTL with user choice
+    # apply user TTL
     download_prices.clear()
     download_prices.ttl = 60 * int(cache_ttl)
 
     try:
-        price_series = download_prices(all_syms, start_date, END_DATE, price_field, auto_adjust, cache_tag)
-        write_prices_cache(price_series)  # snapshot to parquet for later fallback
+        price_series = download_prices(all_syms, start_date, END_DATE, price_field, AUTO_ADJUST, cache_tag)
+        write_prices_cache(price_series)  # snapshot for fallback
     except Exception:
         st.warning("Live download failed. Attempting to use cached prices instead.")
         cached = read_prices_cache()
@@ -383,8 +376,8 @@ with st.spinner("Downloading prices from Yahoo Finance…"):
             st.error("Cached file found, but none of the requested symbols are available.")
             st.stop()
 
-# Build date index & forward-fill
-date_index = build_business_index(price_series, END_DATE, business_days)
+# Build date index & forward-fill (if BUSINESS_DAYS)
+date_index = build_business_index(price_series, END_DATE, BUSINESS_DAYS)
 prices = pd.DataFrame(index=date_index)
 for sym, s in price_series.items():
     prices[sym] = s.reindex(date_index).ffill()
@@ -472,11 +465,13 @@ benchmarks_df = pd.concat(bench_long, ignore_index=True)
 fig = build_chart(benchmarks_df)
 st.plotly_chart(fig, use_container_width=True)
 
-# Last price date
+# Last date + download
 last_date = benchmarks_df["date"].max().date()
-st.caption(f"Last price date: **{last_date.isoformat()}** (auto-refresh every ~{cache_ttl} minutes or on demand via the button).")
+st.caption(
+    f"Last price date: **{last_date.isoformat()}** "
+    f"(auto-refresh every ~{cache_ttl} minutes or on demand via the button)."
+)
 
-# Download chart as standalone HTML
 html_bytes = fig.to_html(full_html=True, include_plotlyjs="inline").encode("utf-8")
 st.download_button(
     label="Download chart as HTML",
