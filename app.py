@@ -235,6 +235,14 @@ all_syms = sorted(set(mapped["yf_ticker"].dropna().unique().tolist() + competito
 cache_tag = f"{price_field}-{auto_adjust}-{business_days}-{start_date}-{END_DATE}-{sorted(competitors)}-{refresh}-{cache_ttl}"
 
 with st.spinner("Downloading prices from Yahoo Finance…"):
+    st.write({
+    "start_date": start_date,
+    "end_date": END_DATE,
+    "symbols_count": len(all_syms),
+    "first_symbols": all_syms[:10],
+    "py_version": __import__("sys").version,
+})
+
     # override default TTL with user choice
     download_prices.clear()  # ensure the custom ttl below applies fresh
     download_prices.ttl = 60 * int(cache_ttl)
