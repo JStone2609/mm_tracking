@@ -268,6 +268,7 @@ for _, r in per_purchase_matrix.iterrows():
 def competitor_timeseries_synced(sym: str) -> pd.DataFrame:
     if sym not in prices.columns:
         return pd.DataFrame()
+
     per_list = []
     for ent in entry_dates:
         ent2 = entry_index(date_index, ent)
@@ -278,16 +279,33 @@ def competitor_timeseries_synced(sym: str) -> pd.DataFrame:
             continue
         s_val = (prices[sym] / p0).where(date_index >= ent2, 0.0)
         per_list.append(s_val)
+
     if not per_list:
         return pd.DataFrame()
+
+    # Build “matrix”: rows = simulated buys, columns = date axis (from the Series indices)
     mat = pd.DataFrame(per_list)
-    mat.columns = mat.index.strftime("%Y-%m-%d")
+
+    # Ensure columns are datetimes, then format to YYYY-MM-DD strings
+    if not isinstance(mat.columns, pd.DatetimeIndex):
+        try:
+            mat.columns = pd.to_datetime(mat.columns)
+        except Exception:
+            pass
+    if isinstance(mat.columns, pd.DatetimeIndex):
+        mat.columns = mat.columns.strftime("%Y-%m-%d")
+    else:
+        mat.columns = [str(c) for c in mat.columns]
+
+    # Add the metadata cols to reuse the same aggregator
     mat.insert(0, "Buy Date", [""] * len(mat))
     mat.insert(0, "Ticker", [""] * len(mat))
     mat.insert(2, "Yahoo Symbol", [sym] * len(mat))
+
     ts = aggregate_from_values_matrix(mat)
     ts["series"] = sym
     return ts
+
 
 bench_long = [portfolio_df]
 for comp in competitors_present:
