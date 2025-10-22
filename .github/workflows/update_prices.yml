@@ -1,15 +1,14 @@
+# .github/workflows/update_prices.yml
 name: Update Prices Cache
 
 on:
   schedule:
-    # Mon–Fri at 22:15 UTC (safe after US close regardless of DST)
-    - cron: "15 22 * * 1-5"
+    - cron: "10 22 * * 1-5"   # ~22:10 UTC on trading days
   workflow_dispatch: {}
   push:
     paths:
       - "mm_top_20.csv"
       - "ticker_map.csv"
-      - "scripts/build_prices_cache.py"
       - ".github/workflows/update_prices.yml"
 
 jobs:
@@ -27,20 +26,85 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install "yfinance[fast]==0.2.43" curl_cffi pandas pyarrow numpy
+          pip install "yfinance[fast]==0.2.43" curl_cffi pandas numpy
 
-      - name: Build parquet
-        run: python scripts/build_prices_cache.py
-
-      - name: Commit & push if changed
+      - name: Generate prices cache
         run: |
-          set -e
-          if git status --porcelain prices_cache.parquet | grep -q .; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add prices_cache.parquet
-            git commit -m "Update prices cache"
-            git push
-          else
-            echo "No parquet changes; skipping commit."
-          fi
+          python - <<'PY'
+          import pandas as pd, numpy as np
+          import yfinance as yf
+          from datetime import timedelta
+          try:
+              from curl_cffi import requests as cf_requests
+              sess = cf_requests.Session(impersonate="chrome")
+          except Exception:
+              sess = None
+
+          # Load CSVs
+          buys = pd.read_csv("mm_top_20.csv")
+          tmap = pd.read_csv("ticker_map.csv")
+
+          def exchsym_to_yahoo(resolved: str) -> str | None:
+              if not isinstance(resolved, str) or ":" not in resolved: return None
+              exch, sym = resolved.split(":", 1)
+              suffix = {"NASDAQ":"","NYSE":"","AMEX":"","NYSEARCA":"","LON":".L","LSE":".L","AMS":".AS"}.get(exch.strip().upper(),"")
+              return sym.strip().upper() + suffix
+
+          tmap = tmap.rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"})
+          tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
+          buys = buys.rename(columns={"Ticker":"user_ticker","Date":"buy_date"})
+          buys["buy_date"] = pd.to_datetime(buys["buy_date"])
+
+          mapped = buys.merge(tmap[["user_ticker","yf_ticker"]], on="user_ticker", how="left")
+          mapped["yf_ticker"] = np.where(
+              mapped["yf_ticker"].isna() | (mapped["yf_ticker"].astype(str).str.len()==0),
+              mapped["user_ticker"].astype(str).str.upper(),
+              mapped["yf_ticker"]
+          )
+
+          # Symbols to fetch (portfolio + fixed competitors)
+          competitors = ["SPY","QQQ"]
+          symbols = sorted(set(mapped["yf_ticker"].dropna()) | set(competitors))
+
+          # Date window: from earliest buy minus 5 days to tomorrow (Yahoo end is exclusive)
+          start = (mapped["buy_date"].min() - pd.Timedelta(days=5)).date().isoformat()
+          end = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
+
+          # Download (chunked) -> columns are symbols, index are dates (Close)
+          ok = {}
+          CHUNK = 8
+          for i in range(0, len(symbols), CHUNK):
+              chunk = symbols[i:i+CHUNK]
+              df = yf.download(
+                  tickers=chunk, start=start, end=end,
+                  interval="1d", auto_adjust=True,
+                  group_by="ticker", progress=False, threads=False,
+                  session=sess
+              )
+              if df is None or df.empty:
+                  continue
+              if isinstance(df.columns, pd.MultiIndex):
+                  for sym in chunk:
+                      if sym in df.columns.get_level_values(0):
+                          s = df[sym]["Close"].dropna()
+                          if not s.empty: ok[sym] = s
+              else:
+                  if len(chunk)==1 and "Close" in df.columns:
+                      ok[chunk[0]] = df["Close"].dropna()
+
+          if not ok:
+              raise SystemExit("No data fetched — check symbols or Yahoo availability.")
+
+          out = pd.DataFrame(ok).sort_index()
+          out.index = pd.to_datetime(out.index)
+          out.to_parquet("prices_cache.parquet")
+          print("Wrote prices_cache.parquet with columns:", list(out.columns))
+          PY
+
+      - name: Commit & push parquet
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prices_cache.parquet
+          git commit -m "Update prices cache" || echo "No changes"
+          git push
