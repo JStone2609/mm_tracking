@@ -20,12 +20,15 @@ st.set_page_config(page_title="Mount Megiddo Top 20 vs SPY & QQQ — ROI", layou
 st.title("Mount Megiddo Top 20 vs SPY & QQQ — Live Tracking")
 
 st.caption(
-    "The **Mount Megiddo Top 20** selects 20 stocks each month and dollar-cost averages 1 unit "
-    "into each position on its specified buy date. For a fair comparison, **SPY** and **QQQ** "
-    "also invest **1 unit on each of those same buy dates**, rolling forward to the next date "
-    "where the ETF has a valid price if the market was closed. ROI shown is portfolio value minus "
-    "cost, divided by cost (i.e., % return on invested units)."
+    """
+- **What we do:** The **Mount Megiddo Top 20** selects 20 stocks each month and dollar-cost averages **1 unit** into each position on its specified buy date.
+- **Fair benchmark:** **SPY** and **QQQ** also invest **1 unit** on those same buy dates, rolling forward to the next date with a valid price if the market was closed.
+- **ROI metric:** (Portfolio value − cost) ÷ cost (i.e., percent return on invested units).
+- **Breakdown:** Hover over any point on the chart to see ROI, cumulative profit, total value, and active buy count for any specific date.
+- **Note:** Only **18** stocks were sent for **October 2025**.
+"""
 )
+
 
 # ---------- Helpers ----------
 def exchsym_to_yahoo(resolved: str) -> str | None:
