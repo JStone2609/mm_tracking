@@ -229,15 +229,27 @@ for _, row in mapped.iterrows():
     per_purchase_values.append(s_val)
     row_keys.append((row["user_ticker"], row["buy_date"].date().isoformat(), sym))
 
-if not per_purchase_values:
-    st.error("No valid portfolio purchases after mapping to parquet prices.")
-    st.stop()
-
+# Build the per-purchase matrix
 per_purchase_matrix = pd.DataFrame(per_purchase_values)
-per_purchase_matrix.columns = per_purchase_matrix.index.strftime("%Y-%m-%d")
+
+# Ensure the date columns are real datetimes, then format to YYYY-MM-DD strings
+if not isinstance(per_purchase_matrix.columns, pd.DatetimeIndex):
+    try:
+        per_purchase_matrix.columns = pd.to_datetime(per_purchase_matrix.columns)
+    except Exception:
+        # If they were already strings or mixed, leave as-is; we’ll stringify below
+        pass
+
+if isinstance(per_purchase_matrix.columns, pd.DatetimeIndex):
+    per_purchase_matrix.columns = per_purchase_matrix.columns.strftime("%Y-%m-%d")
+else:
+    per_purchase_matrix.columns = [str(c) for c in per_purchase_matrix.columns]
+
+# Add the descriptive columns
 per_purchase_matrix.insert(0, "Buy Date", [k[1] for k in row_keys])
-per_purchase_matrix.insert(0, "Ticker", [k[0] for k in row_keys])
+per_purchase_matrix.insert(0, "Ticker",   [k[0] for k in row_keys])
 per_purchase_matrix.insert(2, "Yahoo Symbol", [k[2] for k in row_keys])
+
 
 # Portfolio aggregate series
 portfolio_df = aggregate_from_values_matrix(per_purchase_matrix)
