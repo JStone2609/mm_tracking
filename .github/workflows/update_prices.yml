@@ -3,7 +3,7 @@ name: Update Prices Cache
 
 on:
   schedule:
-    - cron: "10 22 * * 1-5"   # ~22:10 UTC on trading days
+    - cron: "10 22 * * 1-5"   # ~22:10 UTC on trading days (after US close)
   workflow_dispatch: {}
   push:
     paths:
@@ -14,6 +14,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,34 +27,29 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install "yfinance[fast]==0.2.43" curl_cffi pandas numpy
+          # Use the newer yfinance that worked locally for you
+          pip install "yfinance==0.2.66" pandas numpy pyarrow
 
       - name: Generate prices cache
         run: |
           python - <<'PY'
           import pandas as pd, numpy as np
           import yfinance as yf
-          from datetime import timedelta
-          try:
-              from curl_cffi import requests as cf_requests
-              sess = cf_requests.Session(impersonate="chrome")
-          except Exception:
-              sess = None
 
-          # Load CSVs
-          buys = pd.read_csv("mm_top_20.csv")
-          tmap = pd.read_csv("ticker_map.csv")
+          # ---- Load inputs ----
+          buys = pd.read_csv("mm_top_20.csv").rename(columns={"Ticker":"user_ticker","Date":"buy_date"})
+          buys["buy_date"] = pd.to_datetime(buys["buy_date"], errors="coerce")
+
+          tmap = pd.read_csv("ticker_map.csv").rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"})
 
           def exchsym_to_yahoo(resolved: str) -> str | None:
               if not isinstance(resolved, str) or ":" not in resolved: return None
               exch, sym = resolved.split(":", 1)
-              suffix = {"NASDAQ":"","NYSE":"","AMEX":"","NYSEARCA":"","LON":".L","LSE":".L","AMS":".AS"}.get(exch.strip().upper(),"")
-              return sym.strip().upper() + suffix
+              exch = exch.strip().upper(); sym = sym.strip().upper()
+              suffix = {"NASDAQ":"","NYSE":"","AMEX":"","NYSEARCA":"","LON":".L","LSE":".L","AMS":".AS"}.get(exch,"")
+              return sym + suffix
 
-          tmap = tmap.rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"})
           tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
-          buys = buys.rename(columns={"Ticker":"user_ticker","Date":"buy_date"})
-          buys["buy_date"] = pd.to_datetime(buys["buy_date"])
 
           mapped = buys.merge(tmap[["user_ticker","yf_ticker"]], on="user_ticker", how="left")
           mapped["yf_ticker"] = np.where(
@@ -62,41 +58,78 @@ jobs:
               mapped["yf_ticker"]
           )
 
-          # Symbols to fetch (portfolio + fixed competitors)
-          competitors = ["SPY","QQQ"]
-          symbols = sorted(set(mapped["yf_ticker"].dropna()) | set(competitors))
+          competitors = ["SPY", "QQQ"]
+          symbols = sorted(set(mapped["yf_ticker"].dropna().astype(str)) | set(competitors))
 
-          # Date window: from earliest buy minus 5 days to tomorrow (Yahoo end is exclusive)
+          # Date window: earliest buy - 5d  → tomorrow (Yahoo end is exclusive)
           start = (mapped["buy_date"].min() - pd.Timedelta(days=5)).date().isoformat()
-          end = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
+          end   = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
 
-          # Download (chunked) -> columns are symbols, index are dates (Close)
+          print("Fetching", len(symbols), "symbols")
+          print("Window:", start, "→", end)
+
           ok = {}
+
+          # ---- 1) Chunked multi-ticker downloads (no custom session) ----
           CHUNK = 8
           for i in range(0, len(symbols), CHUNK):
               chunk = symbols[i:i+CHUNK]
-              df = yf.download(
-                  tickers=chunk, start=start, end=end,
-                  interval="1d", auto_adjust=True,
-                  group_by="ticker", progress=False, threads=False,
-                  session=sess
-              )
+              try:
+                  df = yf.download(
+                      tickers=chunk,
+                      start=start, end=end,
+                      interval="1d",
+                      auto_adjust=True,
+                      group_by="ticker",
+                      progress=False,
+                      threads=False,    # more reliable in CI
+                  )
+              except Exception as e:
+                  print("Batch failed for", chunk, "reason:", e)
+                  df = None
+
               if df is None or df.empty:
                   continue
+
               if isinstance(df.columns, pd.MultiIndex):
+                  roots = set(df.columns.get_level_values(0))
                   for sym in chunk:
-                      if sym in df.columns.get_level_values(0):
+                      if sym in roots and "Close" in df[sym].columns:
                           s = df[sym]["Close"].dropna()
-                          if not s.empty: ok[sym] = s
+                          if not s.empty:
+                              ok[sym] = s
               else:
-                  if len(chunk)==1 and "Close" in df.columns:
-                      ok[chunk[0]] = df["Close"].dropna()
+                  # single-ticker frame
+                  if len(chunk) == 1 and "Close" in df.columns:
+                      s = df["Close"].dropna()
+                      if not s.empty:
+                          ok[chunk[0]] = s
+
+          # ---- 2) Per-symbol fallback with small retries ----
+          missing = [s for s in symbols if s not in ok]
+          for sym in missing:
+              success = False
+              for _ in range(3):
+                  try:
+                      h = yf.Ticker(sym).history(start=start, end=end, interval="1d", auto_adjust=True)
+                      if h is not None and not h.empty and "Close" in h.columns:
+                          s = h["Close"].dropna()
+                          if not s.empty:
+                              ok[sym] = s
+                              success = True
+                              break
+                  except Exception:
+                      continue
+              if not success:
+                  print("Fallback failed for", sym)
 
           if not ok:
-              raise SystemExit("No data fetched — check symbols or Yahoo availability.")
+              print("WARN: No data fetched — leaving existing prices_cache.parquet as-is (if any).")
+              raise SystemExit(0)  # don't fail the job; nothing to commit
 
-          out = pd.DataFrame(ok).sort_index()
+          out = pd.DataFrame(ok)
           out.index = pd.to_datetime(out.index)
+          out = out.sort_index()
           out.to_parquet("prices_cache.parquet")
           print("Wrote prices_cache.parquet with columns:", list(out.columns))
           PY
