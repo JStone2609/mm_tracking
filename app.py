@@ -59,12 +59,13 @@ def load_map(path: Path) -> pd.DataFrame:
     return df[["user_ticker", "yf_ticker"]]
 
 @st.cache_data(show_spinner=False)
-def load_prices_parquet(path: Path) -> pd.DataFrame:
+def load_prices_parquet(path: Path, version: int) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df.index = pd.to_datetime(df.index, errors="coerce")
     df = df[~df.index.isna()].sort_index()
     df = df.loc[:, df.notna().any(axis=0)]
     return df
+
 
 def first_valid_on_or_after(s: pd.Series, when: pd.Timestamp) -> pd.Timestamp | None:
     sub = s.loc[s.index >= when]
@@ -141,7 +142,11 @@ if not PARQUET_PATH.exists():
     st.stop()
 
 try:
-    prices = load_prices_parquet(PARQUET_PATH)
+    try:
+        parquet_version = PARQUET_PATH.stat().st_mtime_ns  # cache-buster
+    except Exception:
+        parquet_version = 0
+    prices = load_prices_parquet(PARQUET_PATH, parquet_version)
 except Exception as e:
     st.error(f"Failed to load prices_cache.parquet: {e}")
     st.stop()
