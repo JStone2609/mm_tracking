@@ -273,8 +273,7 @@ else:
     price_note = f"Prices cache last date: **{last_price_date.isoformat()}**."
 
 st.caption(
-    f"Bankroll window: **{chart_start.date().isoformat()} → {today_ts.date().isoformat()}** · "
-    f"Last CloseDate in data: **{last_close_str}** · {price_note}"
+    f"Last Closed Trade: **{last_close_str}** · {price_note}"
 )
 
 
