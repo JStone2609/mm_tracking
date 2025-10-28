@@ -167,7 +167,9 @@ if mapped.empty:
 first_buy_date = pd.to_datetime(buys["buy_date"].min()).normalize()
 
 # Portfolio per-purchase values (per-symbol roll-forward)
-date_index = prices.index
+# restrict the working calendar to start at the first buy date
+date_index = prices.index[prices.index >= first_buy_date]
+prices = prices.loc[date_index]
 per_purchase_values, row_keys = [], []
 for _, row in mapped.iterrows():
     sym, bdt = row["yf_ticker"], row["buy_date"]
@@ -237,6 +239,8 @@ for comp in COMPETITORS:
         bench_long.append(cdf)
 
 benchmarks_df = pd.concat(bench_long, ignore_index=True)
+benchmarks_df = benchmarks_df[benchmarks_df["date"] >= first_buy_date].reset_index(drop=True)
+
 
 # Plot
 fig = build_chart(benchmarks_df, start_date=first_buy_date)
