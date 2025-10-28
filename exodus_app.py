@@ -29,16 +29,20 @@ STARTING_BANKROLL = 40_000.0
 TZ = ZoneInfo("Europe/London")  # only used to decide "today" (naive date)
 
 # ---------- Page ----------
-st.set_page_config(page_title="Plus500 Bankroll vs SPY & QQQ", layout="wide")
-st.title("Plus500 Bankroll — vs SPY & QQQ")
+st.set_page_config(page_title="MM Exodus vs SPY & QQQ — Value & RoC", layout="wide")
+st.title("MM Exodus vs SPY & QQQ — Value & Return on Capital")
 
 st.caption(
     """
-Bankroll books **NetPLInUserCurrency** on the **date of CloseTime** (when a trade closes).
-Benchmarks invest **$40,000** on the **date of the first Plus500 trade open** (first valid market day),
-then **hold** through the end of the chart.
+- **What this shows:** **MM Exodus** active leveraged trading, starting with a bankroll of **$40,000**.
+- **Trading Data:** Data used in the format of closed trades rather than daily tracking, hence the 'jumps' in bankroll reflect when trades are closed. In reality the bankroll was smoother over time.
+- **Benchmarks:** **SPY** and **QQQ** each invest **$40,000** on the **first MM Exodus open date** (first valid market day) and then **buy & hold** thereafter.
+- **Metric:** **Return on Capital (RoC)** = (Value − 40,000) ÷ 40,000.
+- **Hover details:** Date, **Value**, **RoC** and **Open Trades** (MM Exodus = live trade count; benchmarks = 1 after entry).
+- **Trading Strategy: Where MM Exodus **Open Trades** = 0, this is a deliberate retreat from the market.
 """
 )
+
 
 # ---------- Load CSV (repo file) & normalize CR/LF ----------
 try:
@@ -76,13 +80,15 @@ if not pdf["OpenDate"].notna().any():
 
 # ---------- Calendar index ----------
 start_ts = pdf["OpenDate"].min()                  # earliest open date (tz-naive Timestamp)
-today_date = datetime.now(TZ).date()              # 'today' in Europe/London, as date
-today_ts = pd.Timestamp(today_date)               # tz-naive midnight
+today_date = datetime.now(TZ).date()
+today_ts = pd.Timestamp(today_date)
 
-if start_ts > today_ts:
-    start_ts = today_ts
+# chart starts 1 day before first open so bankroll begins at a clean 40k
+chart_start = (start_ts - pd.Timedelta(days=1)).normalize()
+if chart_start > today_ts:
+    chart_start = today_ts
 
-date_index = pd.date_range(start=start_ts, end=today_ts, freq="D")
+date_index = pd.date_range(start=chart_start, end=today_ts, freq="D")
 date_df = pd.DataFrame({"date": date_index})
 
 # ---------- Daily PnL on CloseDate ----------
@@ -129,6 +135,7 @@ open_trades = (
 daily = daily.merge(open_trades, on="date", how="left")
 daily["open_trades"] = daily["open_trades"].fillna(0).astype(int)
 daily["bankroll"] = STARTING_BANKROLL + daily["daily_pnl"].cumsum()
+daily["roc"] = (daily["bankroll"] - STARTING_BANKROLL) / STARTING_BANKROLL
 
 # ---------- Competitors: load prices cache and build $40k hold series ----------
 def load_prices(path: Path) -> pd.DataFrame | None:
@@ -146,45 +153,59 @@ def load_prices(path: Path) -> pd.DataFrame | None:
 prices = load_prices(PARQUET_PATH)
 competitor_values = {}
 
-def competitor_hold_value(sym: str) -> pd.Series | None:
+def competitor_hold_value(sym: str) -> tuple[pd.Series, pd.Series, pd.Series] | None:
+    """
+    Returns (value_series, open_trades_series, roc_series), all indexed by date_index.
+    - Invest 40k at first valid price on/after start_ts.
+    - open_trades: 0 before entry, 1 on/after entry.
+    - roc: (value - 40k)/40k from entry onward; NaN before entry.
+    """
     if prices is None or sym not in prices.columns:
         return None
-    s = prices[sym].copy()           # Close
-    s = s.dropna()
+    s = prices[sym].copy().dropna()
     if s.empty:
         return None
-    # Normalize to naive dates (00:00)
+
     s.index = pd.to_datetime(s.index).normalize()
     s = s[~s.index.duplicated()].sort_index()
-
-    # Reindex to chart calendar with ffill so we have a continuous series
     s = s.reindex(date_index).ffill()
 
-    # Entry: first valid on/after start_ts
     entry_idx = s.loc[s.index >= start_ts].first_valid_index()
     if entry_idx is None or pd.isna(s.loc[entry_idx]):
         return None
 
     shares = STARTING_BANKROLL / float(s.loc[entry_idx])
     val = s * shares
-    # zero/NaN before entry for a clean plot
+
+    # open trades flag: 0 before entry, 1 afterwards
+    open_ts = pd.Series(0, index=val.index, dtype=int)
+    open_ts.loc[val.index >= entry_idx] = 1
+
+    # competitor RoC
+    roc = (val - STARTING_BANKROLL) / STARTING_BANKROLL
+    roc.loc[val.index < entry_idx] = np.nan
+
+    # hide pre-entry value for a clean plot
     val = val.where(val.index >= entry_idx, np.nan)
-    return val
+    return val, open_ts, roc
+
 
 for sym in COMPETITORS:
-    ser = competitor_hold_value(sym)
-    if ser is not None:
-        competitor_values[sym] = ser
+    res = competitor_hold_value(sym)
+    if res is not None:
+        val, open_ts, roc = res
+        competitor_values[sym] = {"value": val, "open": open_ts, "roc": roc}
 
 # ---------- Plotly chart ----------
 fig = go.Figure()
 
-# Bankroll
+# MM Exodus (bankroll)
 bankroll_custom = np.stack(
     [
-        daily["bankroll"].to_numpy(),
-        daily["daily_pnl"].to_numpy(),
-        daily["open_trades"].to_numpy(),
+        daily["bankroll"].to_numpy(),      # 0
+        daily["daily_pnl"].to_numpy(),     # 1
+        daily["open_trades"].to_numpy(),   # 2
+        daily["roc"].to_numpy(),           # 3
     ],
     axis=-1,
 )
@@ -193,30 +214,42 @@ fig.add_trace(
         x=daily["date"],
         y=daily["bankroll"],
         mode="lines",
-        name="Bankroll (Plus500)",
+        name="MM Exodus",                 # rename
         line=dict(width=3),
         customdata=bankroll_custom,
         hovertemplate=(
             "<b>%{x|%Y-%m-%d}</b><br>"
-            "Bankroll: %{y:.2f}<br>"
-            "Daily PnL: %{customdata[1]:.2f}<br>"
+            "Value: %{y:.2f}<br>"
+            "RoC: %{customdata[3]:.2%}<br>"
             "Open Trades: %{customdata[2]:d}<extra></extra>"
         ),
     )
 )
 
+
 # Competitors
-for sym, ser in competitor_values.items():
+for sym, dct in competitor_values.items():
+    val = dct["value"]
+    opn = dct["open"]
+    roc = dct["roc"]
+    custom = np.stack([val.to_numpy(), roc.to_numpy(), opn.to_numpy()], axis=-1)
     fig.add_trace(
         go.Scatter(
-            x=ser.index,
-            y=ser.values,
+            x=val.index,
+            y=val.values,
             mode="lines",
-            name=f"{sym} (40k hold)",
+            name=f"{sym} (buy & hold)",
             line=dict(width=2),
-            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>" + f"{sym} value: " + "%{y:.2f}<extra></extra>",
+            customdata=custom,
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d}</b><br>"
+                f"{sym} Value: " + "%{y:.2f}<br>"
+                "RoC: %{customdata[1]:.2%}<br>"
+                "Open Trades: %{customdata[2]:d}<extra></extra>"
+            ),
         )
     )
+
 
 fig.update_layout(
     template="plotly_white",
@@ -240,9 +273,10 @@ else:
     price_note = f"Prices cache last date: **{last_price_date.isoformat()}**."
 
 st.caption(
-    f"Bankroll window: **{start_ts.date().isoformat()} → {today_ts.date().isoformat()}** · "
+    f"Bankroll window: **{chart_start.date().isoformat()} → {today_ts.date().isoformat()}** · "
     f"Last CloseDate in data: **{last_close_str}** · {price_note}"
 )
+
 
 html_bytes = fig.to_html(full_html=True, include_plotlyjs="inline").encode("utf-8")
 st.download_button(
