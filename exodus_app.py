@@ -39,7 +39,7 @@ st.caption(
 - **Benchmarks:** **SPY** and **QQQ** each invest **$40,000** on the **first MM Exodus open date** (first valid market day) and then **buy & hold** thereafter.
 - **Metric:** **Return on Capital (RoC)** = (Value − 40,000) ÷ 40,000.
 - **Hover details:** Date, **Value**, **RoC** and **Open Trades** (MM Exodus = live trade count; benchmarks = 1 after entry).
-- **Trading Strategy: Where MM Exodus **Open Trades** = 0, this is a deliberate retreat from the market.
+- **Trading Strategy**: Where MM Exodus **Open Trades** = 0, this is a deliberate retreat from the market.
 """
 )
 
