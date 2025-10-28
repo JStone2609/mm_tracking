@@ -270,10 +270,10 @@ if prices is None:
     price_note = "Prices cache not found — competitor lines omitted."
 else:
     last_price_date = pd.to_datetime(prices.index.max()).date()
-    price_note = f"Prices cache last date: **{last_price_date.isoformat()}**."
+    price_note = f"Competitors last update: **{last_price_date.isoformat()}**."
 
 st.caption(
-    f"Last Closed Trade: **{last_close_str}** · {price_note}"
+    f"MM Exodus Last Closed Trade: **{last_close_str}** · {price_note}"
 )
 
 
