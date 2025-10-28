@@ -67,7 +67,7 @@ jobs:
           symbols = sorted(set(mapped["yf_ticker"].dropna().astype(str)) | set(competitors))
 
           # Date window: earliest buy - 5d  → tomorrow (Yahoo end is exclusive)
-          start = (mapped["buy_date"].min() - pd.Timedelta(days=5)).date().isoformat()
+          start = (mapped["buy_date"].min() - pd.Timedelta(days=200)).date().isoformat()
           end   = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
 
           print("Fetching", len(symbols), "symbols")
