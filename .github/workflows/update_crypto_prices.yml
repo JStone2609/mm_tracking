@@ -1,0 +1,101 @@
+name: Update Crypto Prices Cache
+
+on:
+  schedule:
+    - cron: "20 22 * * *"   # daily ~22:20 UTC
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "mm_crypto_top.csv"
+      - "crypto_map.csv"
+      - ".github/workflows/update_crypto_prices.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyarrow python-dateutil requests
+
+      - name: Generate crypto prices cache (CoinGecko)
+        run: |
+          python - <<'PY'
+          import pandas as pd, numpy as np, time, math, requests
+          from datetime import datetime, timedelta, timezone
+
+          buys = pd.read_csv("mm_crypto_top.csv").rename(columns={"Ticker":"user_symbol","Date":"buy_date"})
+          buys["buy_date"] = pd.to_datetime(buys["buy_date"], errors="coerce")
+
+          cmap = pd.read_csv("crypto_map.csv").rename(columns={"User Symbol":"user_symbol","CoinGecko ID":"cg_id","Currency":"currency"})
+          cmap["user_symbol"] = cmap["user_symbol"].astype(str).str.strip().str.upper()
+          cmap["cg_id"] = cmap["cg_id"].astype(str).str.strip().str.lower()
+          currency = cmap["currency"].mode().iat[0] if not cmap.empty else "USD"
+
+          mapped = buys.merge(cmap[["user_symbol","cg_id"]], on="user_symbol", how="left")
+          ids = sorted(set(mapped["cg_id"].dropna().astype(str)))
+          if not ids:
+            print("No CoinGecko ids found from mapping; aborting.")
+            raise SystemExit(0)
+
+          start_dt = (buys["buy_date"].min() - pd.Timedelta(days=200)).to_pydatetime()
+          end_dt   = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(days=1))
+          start_unix = int(start_dt.timestamp())
+          end_unix   = int(end_dt.timestamp())
+
+          def fetch_market_chart_range(cg_id: str):
+            url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart/range"
+            params = {"vs_currency": currency.lower(), "from": start_unix, "to": end_unix}
+            r = requests.get(url, params=params, timeout=40)
+            if r.status_code != 200:
+              print("WARN", cg_id, "status", r.status_code, r.text[:200])
+              return None
+            data = r.json()
+            # prices: [[ms_timestamp, price], ...]
+            prices = data.get("prices") or []
+            if not prices:
+              return None
+            df = pd.DataFrame(prices, columns=["ts","price"])
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.normalize()
+            # daily close proxy: last obs per day
+            df = df.groupby("ts", as_index=True)["price"].last().rename(cg_id).to_frame()
+            return df
+
+          frames = []
+          for cg_id in ids:
+            df = fetch_market_chart_range(cg_id)
+            if df is not None and not df.empty:
+              frames.append(df)
+            time.sleep(1.2)  # be nice to the API
+
+          if not frames:
+            print("No crypto data fetched; leaving any existing crypto_prices_cache.parquet untouched.")
+            raise SystemExit(0)
+
+          out = pd.concat(frames, axis=1).sort_index()
+          out.index.name = "date"
+          out.to_parquet("crypto_prices_cache.parquet")
+          print("Wrote crypto_prices_cache.parquet with columns:", list(out.columns))
+          PY
+
+      - name: Commit & push parquet
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crypto_prices_cache.parquet
+          git commit -m "Update crypto prices cache" || echo "No changes"
+          git push
