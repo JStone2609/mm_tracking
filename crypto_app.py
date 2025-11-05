@@ -7,14 +7,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-MM_PATH = Path("mm_crypto_top.csv")           # cols: Ticker, Date
+MM_PATH = Path("mm_top_crypto.csv")           # cols: Ticker, Date
 MAP_PATH = Path("crypto_map.csv")             # cols: User Symbol, CoinGecko ID, Currency
 PARQUET_PATH = Path("crypto_prices_cache.parquet")
 COMPETITOR_ID = "bitcoin"    # CoinGecko id
 COMPETITOR_LABEL = "BTC"
 
-st.set_page_config(page_title="MM Crypto Top vs BTC — ROI", layout="wide")
-st.title("MM Crypto Top vs BTC — Live Tracking")
+st.set_page_config(page_title="MM Top Crypto vs BTC — ROI", layout="wide")
+st.title("MM Top Crypto vs BTC — Live Tracking")
 
 st.caption(
     """

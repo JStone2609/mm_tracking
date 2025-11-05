@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}
   push:
     paths:
-      - "mm_crypto_top.csv"
+      - "mm_top_crypto.csv"
       - "crypto_map.csv"
       - ".github/workflows/update_crypto_prices.yml"
 
