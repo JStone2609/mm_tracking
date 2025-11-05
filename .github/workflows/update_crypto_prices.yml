@@ -52,6 +52,11 @@ jobs:
             print("No CoinGecko ids found from mapping; aborting.")
             raise SystemExit(0)
 
+          # after building `mapped` from buys + map:
+          COMPETITOR_IDS = {"bitcoin"}  # always fetch BTC for the benchmark
+
+          ids = sorted(set(mapped["cg_id"].dropna().astype(str)) | COMPETITOR_IDS)
+
           start_dt = (buys["buy_date"].min() - pd.Timedelta(days=200)).to_pydatetime()
           end_dt   = (datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(days=1))
           start_unix = int(start_dt.timestamp())
