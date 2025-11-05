@@ -42,11 +42,18 @@ def load_map(path: Path) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_prices_parquet(path: Path, version: int) -> pd.DataFrame:
     df = pd.read_parquet(path)
-    df.index = pd.to_datetime(df.index, errors="coerce")
+    # ✅ Make index tz-naive to avoid invalid comparison
+    idx = pd.to_datetime(df.index, errors="coerce")
+    try:
+        # If the index is tz-aware, drop the tz; if not, this raises and we fall back
+        idx = idx.tz_localize(None)
+    except (TypeError, AttributeError, ValueError):
+        pass
+    df.index = idx
     df = df[~df.index.isna()].sort_index()
-    # Columns are CoinGecko IDs
     df = df.loc[:, df.notna().any(axis=0)]
     return df
+
 
 def first_valid_on_or_after(s: pd.Series, when: pd.Timestamp) -> pd.Timestamp | None:
     sub = s.loc[s.index >= when]
