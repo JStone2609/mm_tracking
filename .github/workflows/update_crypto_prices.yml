@@ -63,39 +63,75 @@ jobs:
           start_unix = int(start_dt.timestamp())
           end_unix   = int(end_dt.timestamp())
 
-          def fetch_market_chart_range(cg_id: str):
-            url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart/range"
-            params = {"vs_currency": currency.lower(), "from": start_unix, "to": end_unix}
-            r = requests.get(url, params=params, timeout=40)
-            if r.status_code != 200:
-              print("WARN", cg_id, "status", r.status_code, r.text[:200])
+          import time, requests
+          from datetime import datetime, timedelta, timezone
+          import pandas as pd
+
+          # ... keep your existing setup code (start_unix, end_unix, ids, etc.)
+
+          def fetch_market_chart_range(cg_id: str, currency: str, start_unix: int, end_unix: int):
+              url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart/range"
+              params = {"vs_currency": currency.lower(), "from": start_unix, "to": end_unix}
+
+              # up to 6 attempts: ~ (0.5 + 1 + 2 + 4 + 8 + 12) ≈ 27.5 seconds worst case per id
+              delay = 0.5
+              for attempt in range(6):
+                  try:
+                      r = requests.get(url, params=params, timeout=40)
+                      if r.status_code == 200:
+                          data = r.json()
+                          prices = data.get("prices") or []
+                          if not prices:
+                              return None
+                          df = pd.DataFrame(prices, columns=["ts","price"])
+                          df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.normalize()
+                          df = df.groupby("ts", as_index=True)["price"].last().rename(cg_id).to_frame()
+                          return df
+                      elif r.status_code == 429:
+                          # Throttled — exponential backoff
+                          time.sleep(delay)
+                          delay *= 2
+                          continue
+                      else:
+                          # Other HTTP errors: short pause then retry
+                          time.sleep(1.0)
+                  except requests.RequestException:
+                      time.sleep(1.0)
+
+              print("WARN", cg_id, "status", r.status_code if 'r' in locals() else 'N/A', "after retries")
               return None
-            data = r.json()
-            # prices: [[ms_timestamp, price], ...]
-            prices = data.get("prices") or []
-            if not prices:
-              return None
-            df = pd.DataFrame(prices, columns=["ts","price"])
-            df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.normalize()
-            # daily close proxy: last obs per day
-            df = df.groupby("ts", as_index=True)["price"].last().rename(cg_id).to_frame()
-            return df
 
           frames = []
           for cg_id in ids:
-            df = fetch_market_chart_range(cg_id)
-            if df is not None and not df.empty:
-              frames.append(df)
-            time.sleep(1.2)  # be nice to the API
+              df = fetch_market_chart_range(cg_id, currency, start_unix, end_unix)
+              if df is not None and not df.empty:
+                  frames.append(df)
+              # small courtesy pause between ids
+              time.sleep(1.0)
 
           if not frames:
-            print("No crypto data fetched; leaving any existing crypto_prices_cache.parquet untouched.")
-            raise SystemExit(0)
+              print("No crypto data fetched; leaving any existing crypto_prices_cache.parquet untouched.")
+              raise SystemExit(0)
 
+          # build the new day's dataframe from fetched ids
           out = pd.concat(frames, axis=1).sort_index()
+          out.index = pd.to_datetime(out.index)
           out.index.name = "date"
+
+          # ✅ Optional safety: preserve any existing columns/dates if today’s fetch misses an id
+          try:
+              prev = pd.read_parquet("crypto_prices_cache.parquet")
+              prev.index = pd.to_datetime(prev.index)
+              # union of dates + columns; keep old data where new is missing
+              out = prev.join(out, how="outer")
+          except Exception:
+              pass
+
+          # tidy + write
+          out = out.sort_index()
           out.to_parquet("crypto_prices_cache.parquet")
           print("Wrote crypto_prices_cache.parquet with columns:", list(out.columns))
+
           PY
 
       - name: Commit & push parquet
