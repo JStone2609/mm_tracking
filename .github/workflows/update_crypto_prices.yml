@@ -38,7 +38,7 @@ jobs:
           import pandas as pd, numpy as np, time, math, requests
           from datetime import datetime, timedelta, timezone
 
-          buys = pd.read_csv("mm_crypto_top.csv").rename(columns={"Ticker":"user_symbol","Date":"buy_date"})
+          buys = pd.read_csv("mm_top_crypto.csv").rename(columns={"Ticker":"user_symbol","Date":"buy_date"})
           buys["buy_date"] = pd.to_datetime(buys["buy_date"], errors="coerce")
 
           cmap = pd.read_csv("crypto_map.csv").rename(columns={"User Symbol":"user_symbol","CoinGecko ID":"cg_id","Currency":"currency"})
