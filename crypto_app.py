@@ -1,4 +1,4 @@
-# crypto_app.py — MM Global Momentum Algorithm vs Competitors — ROI
+# crypto_app.py — MM Crypto Momentum Algorithm vs Competitors — ROI
 
 from datetime import datetime
 from pathlib import Path
@@ -15,12 +15,12 @@ COMPETITORS = [
     ("ethereum", "ETH"),
 ]
 
-st.set_page_config(page_title="MM Global Momentum Algorithm vs Competitors — ROI", layout="wide")
-st.title("MM Global Momentum Algorithm vs Competitors — Live Tracking")
+st.set_page_config(page_title="MM Crypto Momentum Algorithm vs Competitors — ROI", layout="wide")
+st.title("MM Crypto Momentum Algorithm vs Competitors — Live Tracking")
 
 st.caption(
     """
-- **What we do:** The **MM Global Momentum Algorithm** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
+- **What we do:** The **MM Crypto Momentum Algorithm** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
 - **Benchmarks:** **BTC and ETH** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
 - **ROI metric:** (Portfolio value − cost) ÷ cost.
 - **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
