@@ -10,16 +10,20 @@ import streamlit as st
 MM_PATH = Path("mm_top_crypto.csv")           # cols: Ticker, Date
 MAP_PATH = Path("crypto_map.csv")             # cols: User Symbol, CoinGecko ID, Currency
 PARQUET_PATH = Path("crypto_prices_cache.parquet")
-COMPETITOR_ID = "bitcoin"    # CoinGecko id
-COMPETITOR_LABEL = "BTC"
+COMPETITORS = [
+    ("bitcoin", "BTC"),
+    ("ethereum", "ETH"),
+    ("solana", "SOL"),
+    ("ripple", "XRP"),
+]
 
-st.set_page_config(page_title="MM Top Crypto vs BTC — ROI", layout="wide")
-st.title("MM Top Crypto vs BTC — Live Tracking")
+st.set_page_config(page_title="MM Top Crypto vs Competitors — ROI", layout="wide")
+st.title("MM Top Crypto vs Competitors — Live Tracking")
 
 st.caption(
     """
 - **What we do:** The **MM Crypto Top** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
-- **Benchmark:** **BTC** also invests **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
+- **Benchmarks:** **BTC, ETH, SOL, and XRP** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
 - **ROI metric:** (Portfolio value − cost) ÷ cost.
 - **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
 """
@@ -205,9 +209,10 @@ def competitor_series(cg_id: str, label: str) -> pd.DataFrame:
     return ts
 
 bench_long = [portfolio_df]
-btc_df = competitor_series(COMPETITOR_ID, COMPETITOR_LABEL)
-if not btc_df.empty:
-    bench_long.append(btc_df)
+for cg_id, label in COMPETITORS:
+    competitor_df = competitor_series(cg_id, label)
+    if not competitor_df.empty:
+        bench_long.append(competitor_df)
 
 benchmarks_df = pd.concat(bench_long, ignore_index=True)
 benchmarks_df = benchmarks_df[benchmarks_df["date"] >= first_buy_date].reset_index(drop=True)
@@ -221,7 +226,7 @@ st.caption(f"Last price date in crypto cache: **{last_date.isoformat()}**.")
 html_bytes = fig.to_html(full_html=True, include_plotlyjs="inline").encode("utf-8")
 st.download_button(
     label="Download chart as HTML",
-    file_name=f"mm_crypto_vs_btc_{datetime.utcnow().date().isoformat()}.html",
+    file_name=f"mm_crypto_vs_competitors_{datetime.utcnow().date().isoformat()}.html",
     data=html_bytes,
     mime="text/html",
 )

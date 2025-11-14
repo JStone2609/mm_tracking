@@ -54,7 +54,7 @@ jobs:
             raise SystemExit(0)
 
           # after building `mapped` from buys + map:
-          COMPETITOR_IDS = {"bitcoin"}  # always fetch BTC for the benchmark
+          COMPETITOR_IDS = {"bitcoin", "ethereum", "solana", "ripple"}  # always fetch competitors for benchmarks
 
           ids = sorted(set(mapped["cg_id"].dropna().astype(str)) | COMPETITOR_IDS)
 
