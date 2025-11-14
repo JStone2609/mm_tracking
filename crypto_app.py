@@ -1,4 +1,4 @@
-# crypto_app.py — MM Crypto Top vs BTC — ROI
+# crypto_app.py — MM Crypto vs Competitors — ROI
 
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +13,6 @@ PARQUET_PATH = Path("crypto_prices_cache.parquet")
 COMPETITORS = [
     ("bitcoin", "BTC"),
     ("ethereum", "ETH"),
-    ("solana", "SOL"),
     ("ripple", "XRP"),
 ]
 
@@ -22,8 +21,8 @@ st.title("MM Top Crypto vs Competitors — Live Tracking")
 
 st.caption(
     """
-- **What we do:** The **MM Crypto Top** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
-- **Benchmarks:** **BTC, ETH, SOL, and XRP** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
+- **What we do:** The **MM Crypto** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
+- **Benchmarks:** **BTC, ETH, and XRP** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
 - **ROI metric:** (Portfolio value − cost) ÷ cost.
 - **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
 """
@@ -171,7 +170,7 @@ permat.insert(0, "Ticker",   [k[0] for k in row_keys])
 permat.insert(2, "CG ID",    [k[2] for k in row_keys])
 
 portfolio_df = aggregate_matrix(permat)
-portfolio_df["series"] = "MM Crypto Top"
+portfolio_df["series"] = "MM Crypto"
 
 # Entry dates (for competitor)
 value_cols = permat.columns[3:]
