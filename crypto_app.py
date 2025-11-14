@@ -78,13 +78,13 @@ def aggregate_matrix(values_wide: pd.DataFrame, date_col_start_idx: int = 3) -> 
 def build_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp) -> go.Figure:
     fig = go.Figure()
 
-    # Separate "MM" to add it first
+    # Separate "MM Crypto" to add it first
     groups = list(benchmarks_df.groupby("series"))
-    mm_groups = [g for g in groups if g[0] == "MM"]
-    other_groups = [g for g in groups if g[0] != "MM"]
+    mm_crypto_groups = [g for g in groups if g[0] == "MM Crypto"]
+    other_groups = [g for g in groups if g[0] != "MM Crypto"]
 
-    # Add "MM" first, then others
-    ordered_groups = mm_groups + other_groups
+    # Add "MM Crypto" first, then others
+    ordered_groups = mm_crypto_groups + other_groups
 
     for name, df in ordered_groups:
         df = df.sort_values("date")
@@ -178,7 +178,7 @@ permat.insert(0, "Ticker",   [k[0] for k in row_keys])
 permat.insert(2, "CG ID",    [k[2] for k in row_keys])
 
 portfolio_df = aggregate_matrix(permat)
-portfolio_df["series"] = "MM"
+portfolio_df["series"] = "MM Crypto"
 
 # Entry dates (for competitor)
 value_cols = permat.columns[3:]

@@ -16,12 +16,12 @@ COMPETITORS = ["SPY", "QQQ"]  # fixed competitors
 EXPECTED_UPDATE_UTC = "22:10 UTC"  # matches the GitHub Action cron
 
 # ---------- Page ----------
-st.set_page_config(page_title="Mount Megiddo Top 20 vs SPY & QQQ — ROI", layout="wide")
-st.title("Mount Megiddo Top 20 vs SPY & QQQ — Live Tracking")
+st.set_page_config(page_title="MM Global Momentum Algorithm vs SPY & QQQ — ROI", layout="wide")
+st.title("MM Global Momentum Algorithm vs SPY & QQQ — Live Tracking")
 
 st.caption(
     """
-- **What we do:** The **Mount Megiddo Top 20** selects 20 stocks each month and dollar-cost averages **1 unit** into each position on its specified buy date.
+- **What we do:** The **MM Global Momentum Algorithm** selects 20 stocks each month and dollar-cost averages **1 unit** into each position on its specified buy date.
 - **Fair benchmark:** **SPY** and **QQQ** also invest **1 unit** on those same buy dates, rolling forward to the next date with a valid price if the market was closed.
 - **ROI metric:** (Portfolio value − cost) ÷ cost (i.e., percent return on invested units).
 - **Breakdown:** Hover over any point on the chart to see ROI, cumulative profit, total value, and active buy count for any specific date.
@@ -87,7 +87,16 @@ def aggregate_matrix(values_wide: pd.DataFrame, date_col_start_idx: int = 3) -> 
 
 def build_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp) -> go.Figure:
     fig = go.Figure()
-    for name, df in benchmarks_df.groupby("series"):
+
+    # Separate "MM Global" to add it first
+    groups = list(benchmarks_df.groupby("series"))
+    mm_global_groups = [g for g in groups if g[0] == "MM Global"]
+    other_groups = [g for g in groups if g[0] != "MM Global"]
+
+    # Add "MM Global" first, then others
+    ordered_groups = mm_global_groups + other_groups
+
+    for name, df in ordered_groups:
         df = df.sort_values("date")
         custom = np.stack(
             [
@@ -195,7 +204,7 @@ permat.insert(0, "Ticker",   [k[0] for k in row_keys])
 permat.insert(2, "Yahoo Symbol", [k[2] for k in row_keys])
 
 portfolio_df = aggregate_matrix(permat)
-portfolio_df["series"] = "MM Top 20"
+portfolio_df["series"] = "MM Global"
 
 # Portfolio-derived buy dates (after roll-forward)
 value_cols = permat.columns[3:]
