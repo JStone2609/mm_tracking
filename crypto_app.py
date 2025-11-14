@@ -1,4 +1,4 @@
-# crypto_app.py — MM Crypto vs Competitors — ROI
+# crypto_app.py — MM Global Momentum Algorithm vs Competitors — ROI
 
 from datetime import datetime
 from pathlib import Path
@@ -13,16 +13,15 @@ PARQUET_PATH = Path("crypto_prices_cache.parquet")
 COMPETITORS = [
     ("bitcoin", "BTC"),
     ("ethereum", "ETH"),
-    ("ripple", "XRP"),
 ]
 
-st.set_page_config(page_title="MM Top Crypto vs Competitors — ROI", layout="wide")
-st.title("MM Top Crypto vs Competitors — Live Tracking")
+st.set_page_config(page_title="MM Global Momentum Algorithm vs Competitors — ROI", layout="wide")
+st.title("MM Global Momentum Algorithm vs Competitors — Live Tracking")
 
 st.caption(
     """
-- **What we do:** The **MM Crypto** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
-- **Benchmarks:** **BTC, ETH, and XRP** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
+- **What we do:** The **MM Global Momentum Algorithm** selects a set of crypto assets each month and dollar-cost averages **1 unit** into each on its specified buy date.
+- **Benchmarks:** **BTC and ETH** also invest **1 unit** on those same buy dates (first valid day with a price), holding thereafter.
 - **ROI metric:** (Portfolio value − cost) ÷ cost.
 - **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
 """
@@ -79,13 +78,13 @@ def aggregate_matrix(values_wide: pd.DataFrame, date_col_start_idx: int = 3) -> 
 def build_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp) -> go.Figure:
     fig = go.Figure()
 
-    # Separate "MM Crypto" to add it first
+    # Separate "MM" to add it first
     groups = list(benchmarks_df.groupby("series"))
-    mm_crypto_groups = [g for g in groups if g[0] == "MM Crypto"]
-    other_groups = [g for g in groups if g[0] != "MM Crypto"]
+    mm_groups = [g for g in groups if g[0] == "MM"]
+    other_groups = [g for g in groups if g[0] != "MM"]
 
-    # Add "MM Crypto" first, then others
-    ordered_groups = mm_crypto_groups + other_groups
+    # Add "MM" first, then others
+    ordered_groups = mm_groups + other_groups
 
     for name, df in ordered_groups:
         df = df.sort_values("date")
@@ -179,7 +178,7 @@ permat.insert(0, "Ticker",   [k[0] for k in row_keys])
 permat.insert(2, "CG ID",    [k[2] for k in row_keys])
 
 portfolio_df = aggregate_matrix(permat)
-portfolio_df["series"] = "MM Crypto"
+portfolio_df["series"] = "MM"
 
 # Entry dates (for competitor)
 value_cols = permat.columns[3:]
