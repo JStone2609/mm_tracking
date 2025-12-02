@@ -1,4 +1,4 @@
-# rerun a
+# rerun all
 name: Update Crypto Prices Cache
 
 on:
