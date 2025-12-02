@@ -250,6 +250,10 @@ for comp in COMPETITORS:
 benchmarks_df = pd.concat(bench_long, ignore_index=True)
 benchmarks_df = benchmarks_df[benchmarks_df["date"] >= first_buy_date].reset_index(drop=True)
 
+# Filter out dates where no series has valid ROI data (e.g., market holidays)
+# This prevents gaps in the chart for non-trading days
+valid_dates = benchmarks_df.groupby("date")["roi"].apply(lambda x: x.notna().any())
+benchmarks_df = benchmarks_df[benchmarks_df["date"].isin(valid_dates[valid_dates].index)].reset_index(drop=True)
 
 # Plot
 fig = build_chart(benchmarks_df, start_date=first_buy_date)
