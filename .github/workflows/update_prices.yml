@@ -135,6 +135,17 @@ jobs:
           out = pd.DataFrame(ok)
           out.index = pd.to_datetime(out.index)
           out = out.sort_index()
+
+          # Forward-fill missing prices per stock (for market holidays/closures)
+          # Create a full date range from min to max date
+          if not out.empty:
+              full_date_range = pd.date_range(start=out.index.min(), end=out.index.max(), freq='D')
+              out = out.reindex(full_date_range)
+              # Forward-fill missing values per column (stock)
+              out = out.ffill()
+              # Remove any rows that are still all NaN (before first trading day)
+              out = out.dropna(how='all')
+
           out.to_parquet("prices_cache.parquet")
           print("Wrote prices_cache.parquet with columns:", list(out.columns))
           PY
