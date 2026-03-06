@@ -1,286 +1,233 @@
-# exodus_app.py — Plus500 Bankroll Tracker + SPY/QQQ Benchmarks
-# --------------------------------------------------------------
-# - Loads plus500_demo.csv from the repo (no upload UI)
-# - Normalizes CR/LF before parsing
-# - Bankroll = 40,000 + cumulative NetPL booked on CloseDate only
-# - Competitors (SPY, QQQ): invest 40,000 on first trade's OpenDate (first valid price on/after),
-#   then hold with daily value updates from prices_cache.parquet
-# - Plotly chart with hover (bankroll, daily PnL, open trades, SPY/QQQ values)
-# - Download chart as HTML
-#
-# Requirements:
-#   pip install streamlit pandas plotly pyarrow
-
-from __future__ import annotations
+# exodus_app.py — MM Exodus Algo One-Off Trades vs Competitors
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-CSV_PATH = "plus500_demo.csv"
-PARQUET_PATH = Path("prices_cache.parquet")
-COMPETITORS = ["SPY", "QQQ"]
-STARTING_BANKROLL = 40_000.0
-TZ = ZoneInfo("Europe/London")  # only used to decide "today" (naive date)
+EXODUS_PATH = Path("mm_exodus_algo.csv")           # cols: Ticker, Amount, Date, Action
+MAP_PATH = Path("exodus_ticker_map.csv")           # cols: User Ticker, Resolved Ticker, Currency
+PARQUET_PATH = Path("exodus_prices_cache.parquet")
+COMPETITORS = [
+    ("NASDAQ:TSLA", "TSLA"),
+    ("NASDAQ:AMZN", "AMZN"),
+]
 
-# ---------- Page ----------
-st.set_page_config(page_title="MM Exodus vs SPY & QQQ — Value & RoC", layout="wide")
-st.title("MM Exodus vs SPY & QQQ — Value & Return on Capital")
+st.set_page_config(page_title="MM Exodus Algo One-Off Trades vs Competitors", layout="wide")
+st.title("MM Exodus Algo One-Off Trades vs Competitors — Live Tracking")
 
 st.caption(
     """
-- **What this shows:** **MM Exodus** active leveraged trading, starting with a bankroll of **$40,000**.
-- **Trading Data:** Data used in the format of closed trades rather than daily tracking, hence the 'jumps' in bankroll reflect when trades are closed. In reality the bankroll was smoother over time.
-- **Benchmarks:** **SPY** and **QQQ** each invest **$40,000** on the **first MM Exodus open date** (first valid market day) and then **buy & hold** thereafter.
-- **Metric:** **Return on Capital (RoC)** = (Value − 40,000) ÷ 40,000.
-- **Hover details:** Date, **Value**, **RoC** and **Open Trades** (MM Exodus = live trade count; benchmarks = 1 after entry).
-- **Trading Strategy**: Where MM Exodus **Open Trades** = 0, this is a deliberate retreat from the market.
+- **What we do:** The **MM Exodus Algo** tracks one-off trades (buys) and compares their performance to selected competitors.
+- **Benchmarks:** For each buy, the same amount is invested in each competitor on the same date.
+- **ROI metric:** (Portfolio value − cost) ÷ cost.
+- **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
 """
 )
 
+def load_trades(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df.rename(columns={"Ticker":"user_ticker","Amount":"amount","Date":"date","Action":"action"})
+    df["user_ticker"] = df["user_ticker"].astype(str).str.strip().str.upper()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    df["action"] = df["action"].astype(str).str.strip().str.upper()
+    return df.dropna(subset=["user_ticker","date","amount"]).reset_index(drop=True)
 
-# ---------- Load CSV (repo file) & normalize CR/LF ----------
-try:
-    with open(CSV_PATH, "rb") as f:
-        b = f.read()
-    b = b.replace(b"\r\r\n", b"\n").replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    with open(CSV_PATH, "wb") as f:
-        f.write(b)
-except FileNotFoundError:
-    st.error(f"CSV not found: {CSV_PATH}")
-    st.stop()
-except Exception as e:
-    st.error(f"Failed to read/normalize CSV: {e}")
-    st.stop()
+def load_map(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df.rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved_ticker","Currency":"currency"})
+    df["user_ticker"] = df["user_ticker"].astype(str).str.strip().str.upper()
+    df["resolved_ticker"] = df["resolved_ticker"].astype(str).str.strip().str.upper()
+    return df[["user_ticker","resolved_ticker"]]
 
-try:
-    pdf = pd.read_csv(CSV_PATH)
-except Exception as e:
-    st.error(f"Failed to parse CSV: {e}")
-    st.stop()
-
-# ---------- Parse & normalize ----------
-# CSV is dd/mm/YYYY HH:MM:SS
-pdf["OpenTime"]  = pd.to_datetime(pdf.get("OpenTime"),  errors="coerce", dayfirst=True)
-pdf["CloseTime"] = pd.to_datetime(pdf.get("CloseTime"), errors="coerce", dayfirst=True)
-
-pdf["OpenDate"]  = pdf["OpenTime"].dt.normalize()
-pdf["CloseDate"] = pdf["CloseTime"].dt.normalize()
-
-pdf["NetPLInUserCurrency"] = pd.to_numeric(pdf.get("NetPLInUserCurrency"), errors="coerce")
-
-if not pdf["OpenDate"].notna().any():
-    st.error("No valid OpenDate values after parsing. Check the CSV timestamps.")
-    st.stop()
-
-# ---------- Calendar index ----------
-start_ts = pdf["OpenDate"].min()                  # earliest open date (tz-naive Timestamp)
-today_date = datetime.now(TZ).date()
-today_ts = pd.Timestamp(today_date)
-
-# chart starts 1 day before first open so bankroll begins at a clean 40k
-chart_start = (start_ts - pd.Timedelta(days=1)).normalize()
-if chart_start > today_ts:
-    chart_start = today_ts
-
-date_index = pd.date_range(start=chart_start, end=today_ts, freq="D")
-date_df = pd.DataFrame({"date": date_index})
-
-# ---------- Daily PnL on CloseDate ----------
-daily_pnl = (
-    pdf.groupby("CloseDate", dropna=False)["NetPLInUserCurrency"]
-      .sum()
-      .rename("daily_pnl")
-      .reset_index()
-      .rename(columns={"CloseDate": "date"})
-)
-daily_pnl["date"] = pd.to_datetime(daily_pnl["date"])
-
-daily = (
-    date_df.merge(daily_pnl, on="date", how="left")
-           .assign(daily_pnl=lambda d: d["daily_pnl"].fillna(0.0))
-           .sort_values("date", ignore_index=True)
-)
-
-# ---------- Open-trade count per day (sweep-line) ----------
-events_up = (
-    pdf.loc[pdf["OpenDate"].notna(), ["OpenDate"]]
-       .rename(columns={"OpenDate": "date"})
-       .assign(delta=1)
-)
-events_down = (
-    pdf.loc[pdf["CloseDate"].notna(), ["CloseDate"]]
-       .rename(columns={"CloseDate": "date"})
-       .assign(date=lambda d: d["date"] + pd.Timedelta(days=1), delta=-1)
-)
-events = pd.concat([events_up, events_down], ignore_index=True)
-
-delta_series = (
-    events.groupby("date")["delta"].sum()
-          .reindex(date_index, fill_value=0)
-)
-open_trades_series = delta_series.cumsum().astype(int)
-open_trades = (
-    open_trades_series.rename("open_trades")
-    .rename_axis("date")
-    .reset_index()
-)
-
-# ---------- Bankroll series ----------
-daily = daily.merge(open_trades, on="date", how="left")
-daily["open_trades"] = daily["open_trades"].fillna(0).astype(int)
-daily["bankroll"] = STARTING_BANKROLL + daily["daily_pnl"].cumsum()
-daily["roc"] = (daily["bankroll"] - STARTING_BANKROLL) / STARTING_BANKROLL
-
-# ---------- Competitors: load prices cache and build $40k hold series ----------
-def load_prices(path: Path) -> pd.DataFrame | None:
-    if not path.exists():
-        return None
+@st.cache_data(show_spinner=False)
+def load_prices_parquet(path: Path, version: int) -> pd.DataFrame:
+    df = pd.read_parquet(path)
+    idx = pd.to_datetime(df.index, errors="coerce")
     try:
-        df = pd.read_parquet(path)
-        df.index = pd.to_datetime(df.index, errors="coerce").tz_localize(None)
-        df = df[~df.index.isna()].sort_index()
-        return df
-    except Exception as e:
-        st.warning(f"Could not read {path}: {e}")
+        idx = idx.tz_localize(None)
+    except (TypeError, AttributeError, ValueError):
+        pass
+    df.index = idx
+    df = df[~df.index.isna()].sort_index()
+    df = df.loc[:, df.notna().any(axis=0)]
+    return df
+
+def first_valid_on_or_after(s: pd.Series, when: pd.Timestamp) -> pd.Timestamp | None:
+    sub = s.loc[s.index >= when]
+    sub = sub[sub.notna()]
+    if sub.empty:
         return None
+    return sub.index[0]
 
-prices = load_prices(PARQUET_PATH)
-competitor_values = {}
+def aggregate_matrix(values_wide: pd.DataFrame, date_col_start_idx: int = 3) -> pd.DataFrame:
+    dates = pd.to_datetime(values_wide.columns[date_col_start_idx:])
+    vals = values_wide.iloc[:, date_col_start_idx:].to_numpy(dtype=float)
+    total_value = pd.Series(vals.sum(axis=0), index=dates, name="total_value")
+    active_buys = pd.Series((vals > 0).sum(axis=0), index=dates, name="active_buys")
+    cumulative_profit = (total_value - active_buys).rename("cumulative_profit")
+    roi = (cumulative_profit / active_buys.replace(0, np.nan)).rename("roi")
+    out = pd.concat([total_value, active_buys, cumulative_profit, roi], axis=1).reset_index(names="date")
+    out["date"] = pd.to_datetime(out["date"])
+    return out
 
-def competitor_hold_value(sym: str) -> tuple[pd.Series, pd.Series, pd.Series] | None:
-    """
-    Returns (value_series, open_trades_series, roc_series), all indexed by date_index.
-    - Invest 40k at first valid price on/after start_ts.
-    - open_trades: 0 before entry, 1 on/after entry.
-    - roc: (value - 40k)/40k from entry onward; NaN before entry.
-    """
-    if prices is None or sym not in prices.columns:
-        return None
-    s = prices[sym].copy().dropna()
-    if s.empty:
-        return None
-
-    s.index = pd.to_datetime(s.index).normalize()
-    s = s[~s.index.duplicated()].sort_index()
-    s = s.reindex(date_index).ffill()
-
-    entry_idx = s.loc[s.index >= start_ts].first_valid_index()
-    if entry_idx is None or pd.isna(s.loc[entry_idx]):
-        return None
-
-    shares = STARTING_BANKROLL / float(s.loc[entry_idx])
-    val = s * shares
-
-    # open trades flag: 0 before entry, 1 afterwards
-    open_ts = pd.Series(0, index=val.index, dtype=int)
-    open_ts.loc[val.index >= entry_idx] = 1
-
-    # competitor RoC
-    roc = (val - STARTING_BANKROLL) / STARTING_BANKROLL
-    roc.loc[val.index < entry_idx] = np.nan
-
-    # hide pre-entry value for a clean plot
-    val = val.where(val.index >= entry_idx, np.nan)
-    return val, open_ts, roc
-
-
-for sym in COMPETITORS:
-    res = competitor_hold_value(sym)
-    if res is not None:
-        val, open_ts, roc = res
-        competitor_values[sym] = {"value": val, "open": open_ts, "roc": roc}
-
-# ---------- Plotly chart ----------
-fig = go.Figure()
-
-# MM Exodus (bankroll)
-bankroll_custom = np.stack(
-    [
-        daily["bankroll"].to_numpy(),      # 0
-        daily["daily_pnl"].to_numpy(),     # 1
-        daily["open_trades"].to_numpy(),   # 2
-        daily["roc"].to_numpy(),           # 3
-    ],
-    axis=-1,
-)
-fig.add_trace(
-    go.Scatter(
-        x=daily["date"],
-        y=daily["bankroll"],
-        mode="lines",
-        name="MM Exodus",                 # rename
-        line=dict(width=3),
-        customdata=bankroll_custom,
-        hovertemplate=(
-            "<b>%{x|%Y-%m-%d}</b><br>"
-            "Value: %{y:.2f}<br>"
-            "RoC: %{customdata[3]:.2%}<br>"
-            "Open Trades: %{customdata[2]:d}<extra></extra>"
-        ),
-    )
-)
-
-
-# Competitors
-for sym, dct in competitor_values.items():
-    val = dct["value"]
-    opn = dct["open"]
-    roc = dct["roc"]
-    custom = np.stack([val.to_numpy(), roc.to_numpy(), opn.to_numpy()], axis=-1)
-    fig.add_trace(
-        go.Scatter(
-            x=val.index,
-            y=val.values,
-            mode="lines",
-            name=f"{sym} (buy & hold)",
-            line=dict(width=2),
-            customdata=custom,
-            hovertemplate=(
-                "<b>%{x|%Y-%m-%d}</b><br>"
-                f"{sym} Value: " + "%{y:.2f}<br>"
-                "RoC: %{customdata[1]:.2%}<br>"
-                "Open Trades: %{customdata[2]:d}<extra></extra>"
-            ),
+def build_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp) -> go.Figure:
+    fig = go.Figure()
+    groups = list(benchmarks_df.groupby("series"))
+    exodus_groups = [g for g in groups if g[0] == "MM Exodus"]
+    other_groups = [g for g in groups if g[0] != "MM Exodus"]
+    ordered_groups = exodus_groups + other_groups
+    for name, df in ordered_groups:
+        df = df.sort_values("date")
+        custom = np.stack(
+            [df["total_value"].to_numpy(),
+             df["active_buys"].fillna(0).astype(int).to_numpy(),
+             df["cumulative_profit"].to_numpy(),
+             df["roi"].to_numpy()],
+            axis=-1,
         )
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"], y=df["roi"], mode="lines", name=name,
+                line=dict(width=3),
+                customdata=custom,
+                hovertemplate=(
+                    "<b>%{x|%Y-%m-%d}</b><br>"
+                    + name + ": ROI %{y:.2%}<br>"
+                    "Cumulative Profit: %{customdata[2]:.4f}<br>"
+                    "Total Value: %{customdata[0]:.4f}<br>"
+                    "Active Buys: %{customdata[1]:d}<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        template="plotly_white",
+        xaxis=dict(title="Date", type="date", range=[start_date, None], rangeslider=dict(visible=False)),
+        yaxis=dict(title="ROI", rangemode="tozero", tickformat=".0%"),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0.5, xanchor="center"),
+        margin=dict(l=60, r=60, t=60, b=80),
     )
+    return fig
 
+# ---------- Main ----------
+try:
+    trades = load_trades(EXODUS_PATH)
+    tmap = load_map(MAP_PATH)
+except Exception as e:
+    st.error(f"Failed to read CSVs: {e}")
+    st.stop()
 
-fig.update_layout(
-    template="plotly_white",
-    xaxis=dict(title="Date", type="date"),
-    yaxis=dict(title="Value (USD)", rangemode="tozero"),
-    hovermode="x unified",
-    legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0.5, xanchor="center"),
-    margin=dict(l=60, r=60, t=60, b=60),
-)
+if not PARQUET_PATH.exists():
+    st.error("Missing exodus_prices_cache.parquet. The GitHub Action must write it first.")
+    st.stop()
 
+try:
+    version = PARQUET_PATH.stat().st_mtime_ns
+    prices = load_prices_parquet(PARQUET_PATH, version)
+except Exception as e:
+    st.error(f"Failed to load exodus_prices_cache.parquet: {e}")
+    st.stop()
+
+mapped = trades.merge(tmap, on="user_ticker", how="left")
+mapped["resolved_ticker"] = mapped["resolved_ticker"].fillna("").astype(str)
+available = set(prices.columns.astype(str))
+mapped = mapped[mapped["resolved_ticker"].isin(available)].reset_index(drop=True)
+
+if mapped.empty:
+    st.error("No portfolio tickers are present in the price cache.")
+    st.stop()
+
+first_buy_date = pd.to_datetime(trades["date"].min()).normalize()
+
+date_index = prices.index[prices.index >= first_buy_date]
+prices = prices.loc[date_index]
+
+# Per-purchase values
+per_purchase_values, row_keys = [], []
+for _, row in mapped.iterrows():
+    tid, bdt, amt = row["resolved_ticker"], row["date"], row["amount"]
+    s = prices[tid]
+    ent = first_valid_on_or_after(s, bdt)
+    if ent is None:
+        continue
+    p0 = s.at[ent]
+    if pd.isna(p0) or p0 == 0:
+        continue
+    rel = (s / p0 * amt).where(date_index >= ent, 0.0)
+    per_purchase_values.append(rel)
+    row_keys.append((row["user_ticker"], ent.date().isoformat(), tid))
+
+if not per_purchase_values:
+    st.error("No valid portfolio entries after symbol/date alignment.")
+    st.stop()
+
+permat = pd.DataFrame(per_purchase_values)
+permat.columns = permat.columns.strftime("%Y-%m-%d")
+permat.insert(0, "Buy Date", [k[1] for k in row_keys])
+permat.insert(0, "Ticker",   [k[0] for k in row_keys])
+permat.insert(2, "Resolved Ticker",    [k[2] for k in row_keys])
+
+portfolio_df = aggregate_matrix(permat)
+portfolio_df["series"] = "MM Exodus"
+
+# Entry dates (for competitor)
+value_cols = permat.columns[3:]
+value_dt_index = pd.to_datetime(value_cols)
+entry_dates = []
+for _, r in permat.iterrows():
+    vals = r[value_cols].astype(float).to_numpy()
+    nz = np.flatnonzero(vals > 0)
+    if nz.size:
+        entry_dates.append(value_dt_index[nz[0]])
+
+def competitor_series(tid: str, label: str) -> pd.DataFrame:
+    if tid not in prices.columns:
+        return pd.DataFrame()
+    s = prices[tid]
+    per_list = []
+    for ent, amt in zip(entry_dates, mapped["amount"]):
+        ent2 = first_valid_on_or_after(s, ent)
+        if ent2 is None:
+            continue
+        p0 = s.at[ent2]
+        if pd.isna(p0) or p0 == 0:
+            continue
+        rel = (s / p0 * amt).where(date_index >= ent2, 0.0)
+        per_list.append(rel)
+    if not per_list:
+        return pd.DataFrame()
+    mat = pd.DataFrame(per_list)
+    mat.columns = mat.columns.strftime("%Y-%m-%d")
+    mat.insert(0, "Buy Date", [""] * len(mat))
+    mat.insert(0, "Ticker", [""] * len(mat))
+    mat.insert(2, "Resolved Ticker", [tid] * len(mat))
+    ts = aggregate_matrix(mat)
+    ts["series"] = label
+    return ts
+
+bench_long = [portfolio_df]
+for tid, label in COMPETITORS:
+    competitor_df = competitor_series(tid, label)
+    if not competitor_df.empty:
+        bench_long.append(competitor_df)
+
+benchmarks_df = pd.concat(bench_long, ignore_index=True)
+benchmarks_df = benchmarks_df[benchmarks_df["date"] >= first_buy_date].reset_index(drop=True)
+
+fig = build_chart(benchmarks_df, start_date=first_buy_date)
 st.plotly_chart(fig, use_container_width=True)
 
-# ---------- Footer & download ----------
-last_close = pdf["CloseDate"].max()
-last_close_str = "N/A" if pd.isna(last_close) else pd.to_datetime(last_close).date().isoformat()
-
-if prices is None:
-    price_note = "Prices cache not found — competitor lines omitted."
-else:
-    last_price_date = pd.to_datetime(prices.index.max()).date()
-    price_note = f"Competitors last update: **{last_price_date.isoformat()}**."
-
-st.caption(
-    f"MM Exodus Last Closed Trade: **{last_close_str}** · {price_note}"
-)
-
+last_date = pd.to_datetime(prices.index.max()).date()
+st.caption(f"Last price date in exodus cache: **{last_date.isoformat()}**.")
 
 html_bytes = fig.to_html(full_html=True, include_plotlyjs="inline").encode("utf-8")
 st.download_button(
     label="Download chart as HTML",
-    file_name=f"plus500_vs_spy_qqq_{pd.Timestamp.utcnow().date().isoformat()}.html",
+    file_name=f"mm_exodus_vs_competitors_{datetime.utcnow().date().isoformat()}.html",
     data=html_bytes,
     mime="text/html",
 )

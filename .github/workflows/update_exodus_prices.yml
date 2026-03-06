@@ -1,0 +1,72 @@
+# rerun all
+name: Update Exodus Prices Cache
+
+on:
+  schedule:
+    - cron: "20 22 * * *"   # daily ~22:20 UTC
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "mm_exodus_algo.csv"
+      - "exodus_ticker_map.csv"
+      - ".github/workflows/update_exodus_prices.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyarrow python-dateutil requests
+
+      - name: Generate exodus prices cache
+        run: |
+          python - <<'PY'
+          import pandas as pd, numpy as np, time, math, requests
+          from datetime import datetime, timedelta, timezone
+
+          buys = pd.read_csv("mm_exodus_algo.csv")
+          buys["Date"] = pd.to_datetime(buys["Date"], errors="coerce")
+
+          tmap = pd.read_csv("exodus_ticker_map.csv")
+          tmap["User Ticker"] = tmap["User Ticker"].astype(str).str.strip().str.upper()
+          tmap["Resolved Ticker"] = tmap["Resolved Ticker"].astype(str).str.strip().str.upper()
+          tmap["Currency"] = tmap["Currency"].astype(str).str.strip().str.upper()
+
+          mapped = buys.merge(tmap, left_on="Ticker", right_on="User Ticker", how="left")
+          ids = sorted(set(mapped["Resolved Ticker"].dropna().astype(str)))
+          if not ids:
+            print("No resolved tickers found from mapping; aborting.")
+            raise SystemExit(0)
+
+          # TODO: Implement price fetching logic for stocks (e.g., Yahoo Finance API or other)
+          # For now, just create a dummy DataFrame
+          out = pd.DataFrame({tid: [100.0] for tid in ids})
+          out.index = pd.to_datetime([datetime.utcnow()])
+          out.index.name = "date"
+
+          out.to_parquet("exodus_prices_cache.parquet")
+          print("Wrote exodus_prices_cache.parquet with columns:", list(out.columns))
+          PY
+
+      - name: Commit & push parquet
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add exodus_prices_cache.parquet
+          git commit -m "Update exodus prices cache" || echo "No changes"
+          git push
