@@ -15,12 +15,12 @@ COMPETITORS = [
     ("NASDAQ:AMZN", "AMZN"),
 ]
 
-st.set_page_config(page_title="MM Exodus Algo One-Off Trades vs Competitors", layout="wide")
-st.title("MM Exodus Algo One-Off Trades vs Competitors — Live Tracking")
+st.set_page_config(page_title="MM Exodus Algo vs Competitors", layout="wide")
+st.title("MM Exodus Algo vs Competitors — Live Tracking")
 
 st.caption(
     """
-- **What we do:** The **MM Exodus Algo** tracks one-off trades (buys) and compares their performance to selected competitors.
+- **What we do:** The **MM Exodus Algo** tracks trades and compares their performance to selected competitors.
 - **Benchmarks:** For each buy, the same amount is invested in each competitor on the same date.
 - **ROI metric:** (Portfolio value − cost) ÷ cost.
 - **Breakdown:** Hover a point to see ROI, cumulative profit, total value, and active buy count.
