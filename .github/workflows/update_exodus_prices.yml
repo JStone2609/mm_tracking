@@ -31,33 +31,118 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy pyarrow python-dateutil requests
+          pip install "yfinance==0.2.66" pandas numpy pyarrow
 
       - name: Generate exodus prices cache
         run: |
           python - <<'PY'
-          import pandas as pd, numpy as np, time, math, requests
-          from datetime import datetime, timedelta, timezone
+          import pandas as pd, numpy as np
+          import yfinance as yf
 
-          buys = pd.read_csv("mm_exodus_algo.csv")
-          buys["Date"] = pd.to_datetime(buys["Date"], errors="coerce")
+          # ---- Load inputs ----
+          buys = pd.read_csv("mm_exodus_algo.csv").rename(columns={"Ticker":"user_ticker","Date":"buy_date"})
+          buys["buy_date"] = pd.to_datetime(buys["buy_date"], errors="coerce")
 
-          tmap = pd.read_csv("exodus_ticker_map.csv")
-          tmap["User Ticker"] = tmap["User Ticker"].astype(str).str.strip().str.upper()
-          tmap["Resolved Ticker"] = tmap["Resolved Ticker"].astype(str).str.strip().str.upper()
-          tmap["Currency"] = tmap["Currency"].astype(str).str.strip().str.upper()
+          tmap = pd.read_csv("exodus_ticker_map.csv").rename(columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"})
 
-          mapped = buys.merge(tmap, left_on="Ticker", right_on="User Ticker", how="left")
-          ids = sorted(set(mapped["Resolved Ticker"].dropna().astype(str)))
-          if not ids:
-            print("No resolved tickers found from mapping; aborting.")
-            raise SystemExit(0)
+          def exchsym_to_yahoo(resolved: str) -> str | None:
+            if not isinstance(resolved, str) or ":" not in resolved: return None
+            exch, sym = resolved.split(":", 1)
+            exch = exch.strip().upper(); sym = sym.strip().upper()
+            suffix = {"NASDAQ":"","NYSE":"","AMEX":"","NYSEARCA":"","LON":".L","LSE":".L","AMS":".AS"}.get(exch,"")
+            return sym + suffix
 
-          # TODO: Implement price fetching logic for stocks (e.g., Yahoo Finance API or other)
-          # For now, just create a dummy DataFrame
-          out = pd.DataFrame({tid: [100.0] for tid in ids})
-          out.index = pd.to_datetime([datetime.utcnow()])
-          out.index.name = "date"
+          tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
+
+          mapped = buys.merge(tmap[["user_ticker","yf_ticker"]], on="user_ticker", how="left")
+          mapped["yf_ticker"] = np.where(
+            mapped["yf_ticker"].isna() | (mapped["yf_ticker"].astype(str).str.len()==0),
+            mapped["user_ticker"].astype(str).str.upper(),
+            mapped["yf_ticker"]
+          )
+
+          competitors = ["TSLA", "AMZN"]
+          symbols = sorted(set(mapped["yf_ticker"].dropna().astype(str)) | set(competitors))
+
+          # Date window: earliest buy - 200d  → tomorrow (Yahoo end is exclusive)
+          start = (mapped["buy_date"].min() - pd.Timedelta(days=200)).date().isoformat()
+          end   = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
+
+          print("Fetching", len(symbols), "symbols")
+          print("Window:", start, "→", end)
+
+          ok = {}
+
+          # ---- 1) Chunked multi-ticker downloads (no custom session) ----
+          CHUNK = 8
+          for i in range(0, len(symbols), CHUNK):
+            chunk = symbols[i:i+CHUNK]
+            try:
+              df = yf.download(
+                tickers=chunk,
+                start=start, end=end,
+                interval="1d",
+                auto_adjust=True,
+                group_by="ticker",
+                progress=False,
+                threads=False,    # more reliable in CI
+              )
+            except Exception as e:
+              print("Batch failed for", chunk, "reason:", e)
+              df = None
+
+            if df is None or df.empty:
+              continue
+
+            if isinstance(df.columns, pd.MultiIndex):
+              roots = set(df.columns.get_level_values(0))
+              for sym in chunk:
+                if sym in roots and "Close" in df[sym].columns:
+                  s = df[sym]["Close"].dropna()
+                  if not s.empty:
+                    ok[sym] = s
+            else:
+              # single-ticker frame
+              if len(chunk) == 1 and "Close" in df.columns:
+                s = df["Close"].dropna()
+                if not s.empty:
+                  ok[chunk[0]] = s
+
+          # ---- 2) Per-symbol fallback with small retries ----
+          missing = [s for s in symbols if s not in ok]
+          for sym in missing:
+            success = False
+            for _ in range(3):
+              try:
+                h = yf.Ticker(sym).history(start=start, end=end, interval="1d", auto_adjust=True)
+                if h is not None and not h.empty and "Close" in h.columns:
+                  s = h["Close"].dropna()
+                  if not s.empty:
+                    ok[sym] = s
+                    success = True
+                    break
+              except Exception:
+                continue
+            if not success:
+              print("Fallback failed for", sym)
+
+          if not ok:
+            print("WARN: No data fetched — leaving existing exodus_prices_cache.parquet as-is (if any).")
+            raise SystemExit(0)  # don't fail the job; nothing to commit
+
+          out = pd.DataFrame(ok)
+          out.index = pd.to_datetime(out.index)
+          out = out.sort_index()
+
+          # Forward-fill missing prices per stock (for market holidays/closures)
+          # Create a full date range from min to max date
+          if not out.empty:
+            full_date_range = pd.date_range(start=out.index.min(), end=out.index.max(), freq='D')
+            out = out.reindex(full_date_range)
+            # Forward-fill missing values per column (stock)
+            out = out.ffill()
+            # Remove any rows that are still all NaN (before first trading day)
+            out = out.dropna(how='all')
 
           out.to_parquet("exodus_prices_cache.parquet")
           print("Wrote exodus_prices_cache.parquet with columns:", list(out.columns))
