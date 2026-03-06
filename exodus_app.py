@@ -12,7 +12,7 @@ import streamlit as st
 EXODUS_PATH = Path("mm_exodus_algo.csv")           # cols: Ticker, Amount, Date, Action
 MAP_PATH = Path("exodus_ticker_map.csv")           # cols: User Ticker, Resolved Ticker, Currency
 PARQUET_PATH = Path("exodus_prices_cache.parquet")
-COMPETITORS = ["TSLA", "AMZN"]  # fixed competitors
+COMPETITORS = ["SPY", "QQQ"]  # fixed competitors
 
 EXPECTED_UPDATE_UTC = "22:20 UTC"  # matches the GitHub Action cron
 
