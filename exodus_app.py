@@ -1,4 +1,4 @@
-# exodus_app.py — MM Exodus Algo One-Off Trades vs Competitors
+# exodus_app.py — MM Exodus Algo Trades vs Competitors
 
 from datetime import datetime
 from pathlib import Path
