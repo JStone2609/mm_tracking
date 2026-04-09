@@ -29,6 +29,8 @@ YAHOO_SUFFIXES = {
     "LON": ".L",
     "LSE": ".L",
     "AMS": ".AS",
+    "BME": ".MC",
+    "MCE": ".MC",
 }
 
 
