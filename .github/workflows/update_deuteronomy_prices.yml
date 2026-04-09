@@ -6,9 +6,12 @@ on:
   workflow_dispatch: {}
   push:
     paths:
-      - "mm_deuteronomy_algo.csv"
-      - "deuteronomy_ticker_map.csv"
+      - "data/deuteronomy/deuteronomy_trades.csv"
+      - "data/deuteronomy/deuteronomy_ticker_map.csv"
       - ".github/workflows/update_deuteronomy_prices.yml"
+      - "scripts/update_yahoo_cache.py"
+      - "mm_tracking/cache_builders.py"
+      - "mm_tracking/core.py"
 
 permissions:
   contents: write
@@ -35,138 +38,18 @@ jobs:
 
       - name: Generate deuteronomy prices cache
         run: |
-          python - <<'PY'
-          import pandas as pd
-          import numpy as np
-          import yfinance as yf
-
-          trades = pd.read_csv("mm_deuteronomy_algo.csv").rename(
-              columns={"Ticker":"user_ticker","Amount":"amount","Date":"trade_date","Action":"action"}
-          )
-          trades["trade_date"] = pd.to_datetime(trades["trade_date"], errors="coerce")
-          trades["user_ticker"] = trades["user_ticker"].astype(str).str.strip().str.upper()
-
-          tmap = pd.read_csv("deuteronomy_ticker_map.csv").rename(
-              columns={"User Ticker":"user_ticker","Resolved Ticker":"resolved"}
-          )
-          tmap["user_ticker"] = tmap["user_ticker"].astype(str).str.strip().str.upper()
-
-          def exchsym_to_yahoo(resolved: str):
-              if not isinstance(resolved, str):
-                  return None
-              resolved = resolved.strip()
-              if not resolved or resolved.upper() in {"N/A", "NA", "NONE", "NULL"}:
-                  return None
-              if ":" not in resolved:
-                  return resolved.upper()
-
-              exch, sym = resolved.split(":", 1)
-              exch = exch.strip().upper()
-              sym = sym.strip().upper()
-              suffix = {
-                  "NASDAQ": "",
-                  "NYSE": "",
-                  "AMEX": "",
-                  "NYSEARCA": "",
-                  "LON": ".L",
-                  "LSE": ".L",
-                  "AMS": ".AS",
-              }.get(exch, "")
-              return sym + suffix
-
-          tmap["yf_ticker"] = tmap["resolved"].apply(exchsym_to_yahoo)
-
-          mapped = trades.merge(tmap[["user_ticker", "yf_ticker"]], on="user_ticker", how="left")
-          mapped["yf_ticker"] = np.where(
-              mapped["yf_ticker"].isna() | (mapped["yf_ticker"].astype(str).str.len() == 0),
-              mapped["user_ticker"].astype(str).str.upper(),
-              mapped["yf_ticker"],
-          )
-
-          competitors = ["SPY", "QQQ"]
-          symbols = sorted(set(mapped["yf_ticker"].dropna().astype(str)) | set(competitors))
-
-          start = (mapped["trade_date"].min() - pd.Timedelta(days=200)).date().isoformat()
-          end = (pd.Timestamp.utcnow().normalize() + pd.Timedelta(days=1)).date().isoformat()
-
-          print("Fetching", len(symbols), "symbols")
-          print("Window:", start, "→", end)
-
-          ok = {}
-
-          CHUNK = 8
-          for i in range(0, len(symbols), CHUNK):
-              chunk = symbols[i:i+CHUNK]
-              try:
-                  df = yf.download(
-                      tickers=chunk,
-                      start=start,
-                      end=end,
-                      interval="1d",
-                      auto_adjust=True,
-                      group_by="ticker",
-                      progress=False,
-                      threads=False,
-                  )
-              except Exception as e:
-                  print("Batch failed for", chunk, "reason:", e)
-                  df = None
-
-              if df is None or df.empty:
-                  continue
-
-              if isinstance(df.columns, pd.MultiIndex):
-                  roots = set(df.columns.get_level_values(0))
-                  for sym in chunk:
-                      if sym in roots and "Close" in df[sym].columns:
-                          s = df[sym]["Close"].dropna()
-                          if not s.empty:
-                              ok[sym] = s
-              else:
-                  if len(chunk) == 1 and "Close" in df.columns:
-                      s = df["Close"].dropna()
-                      if not s.empty:
-                          ok[chunk[0]] = s
-
-          missing = [s for s in symbols if s not in ok]
-          for sym in missing:
-              success = False
-              for _ in range(3):
-                  try:
-                      h = yf.Ticker(sym).history(start=start, end=end, interval="1d", auto_adjust=True)
-                      if h is not None and not h.empty and "Close" in h.columns:
-                          s = h["Close"].dropna()
-                          if not s.empty:
-                              ok[sym] = s
-                              success = True
-                              break
-                  except Exception:
-                      continue
-              if not success:
-                  print("Fallback failed for", sym)
-
-          if not ok:
-              print("WARN: No data fetched — leaving existing deuteronomy_prices_cache.parquet as-is (if any).")
-              raise SystemExit(0)
-
-          out = pd.DataFrame(ok)
-          out.index = pd.to_datetime(out.index)
-          out = out.sort_index()
-
-          if not out.empty:
-              full_date_range = pd.date_range(start=out.index.min(), end=out.index.max(), freq="D")
-              out = out.reindex(full_date_range)
-              out = out.ffill()
-              out = out.dropna(how="all")
-
-          out.to_parquet("deuteronomy_prices_cache.parquet")
-          print("Wrote deuteronomy_prices_cache.parquet with columns:", list(out.columns))
-          PY
+          python scripts/update_yahoo_cache.py \
+            --dataset data/deuteronomy/deuteronomy_trades.csv \
+            --map data/deuteronomy/deuteronomy_ticker_map.csv \
+            --output caches/deuteronomy_prices_cache.parquet \
+            --mode trades \
+            --competitor SPY \
+            --competitor QQQ
 
       - name: Commit & push parquet
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deuteronomy_prices_cache.parquet
+          git add caches/deuteronomy_prices_cache.parquet
           git commit -m "Update deuteronomy prices cache" || echo "No changes"
           git push
