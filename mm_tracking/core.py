@@ -5,7 +5,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+
+try:
+    import plotly.graph_objects as go
+except ModuleNotFoundError:
+    go = None
 
 try:
     import streamlit as st
@@ -311,6 +315,8 @@ def filter_valid_roi_dates(benchmarks_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_buy_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp, primary_series: str) -> go.Figure:
+    if go is None:
+        raise ModuleNotFoundError("plotly is required to build charts")
     fig = go.Figure()
     groups = list(benchmarks_df.groupby("series"))
     primary_groups = [group for group in groups if group[0] == primary_series]
@@ -358,6 +364,8 @@ def build_buy_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp, prima
 
 
 def build_trade_chart(benchmarks_df: pd.DataFrame, start_date: pd.Timestamp, primary_series: str) -> go.Figure:
+    if go is None:
+        raise ModuleNotFoundError("plotly is required to build charts")
     fig = go.Figure()
     groups = list(benchmarks_df.groupby("series"))
     primary_groups = [group for group in groups if group[0] == primary_series]
